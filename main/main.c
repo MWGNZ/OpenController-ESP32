@@ -1,239 +1,320 @@
 #include "main.h"
 
-// Main file for Open Controller Classic Edition example code. 
+#define I2C_MASTER_SCL_IO GPIO_NUM_19 /*!< GPIO number used for I2C master clock */
+#define I2C_MASTER_SDA_IO GPIO_NUM_18 /*!< GPIO number used for I2C master data  */
 
-// Clear a value from high GPIO register (GPIO 32 and higher)
-// GPIO.out1_w1tc.val = (uint32_t) (GPIO_NUM-32);
-// Set a value from high GPIO register (GPIO 32 and higher)
-// GPIO.out1_w1ts.val = (uint32_t) (GPIO_NUM-32);
+#define I2C_INPUT_PIN_MASK ((1ULL << I2C_MASTER_SCL_IO) | (1ULL << I2C_MASTER_SDA_IO))
 
-// Clear a value from low GPIO register (GPIO 0-31)
-// GPIO.out_w1tc = (uint32_t) (1ULL<< GPIO_NUM);
-// Set a value from low GPIO register (GPIO 0-31)
-// GPIO.out_w1ts = (uint32_t) (1ULL<< GPIO_NUM);
+uint8_t i2cData[14];
+#define RAD_TO_DEG 57.29578
 
-// Scanning pins for keypad config
-#define GPIO_BTN_SCANA      GPIO_NUM_5
-#define GPIO_BTN_SCANB      GPIO_NUM_18
-#define GPIO_BTN_SCANC      GPIO_NUM_19
-#define GPIO_BTN_SCAND      GPIO_NUM_32
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
 
-// Port pins for keypad config
-#define GPIO_BTN_PULLA      GPIO_NUM_33  
-#define GPIO_BTN_PULLB      GPIO_NUM_25
-#define GPIO_BTN_PULLC      GPIO_NUM_26
-#define GPIO_BTN_PULLD      GPIO_NUM_27
+// vvvvvvvvvvvvvvvvvv  VERY VERY IMPORTANT vvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+// These are the previously determined offsets and scale factors for accelerometer and gyro for
+// a particular example of an MPU-6500. They are not correct for other examples.
+// The IMU code will NOT work well or at all if these are not correct
 
-// Button pins (mostly uneeded but looks nicer in code)
-#define GPIO_BTN_A          GPIO_BTN_SCANA
-#define GPIO_BTN_B          GPIO_BTN_SCANA
-#define GPIO_BTN_X          GPIO_BTN_SCANA
-#define GPIO_BTN_Y          GPIO_BTN_SCANA
-#define GPIO_BTN_DU         GPIO_BTN_SCAND 
-#define GPIO_BTN_DL         GPIO_BTN_SCAND
-#define GPIO_BTN_DD         GPIO_BTN_SCAND
-#define GPIO_BTN_DR         GPIO_BTN_SCAND
-#define GPIO_BTN_L          GPIO_BTN_SCANC    
-#define GPIO_BTN_ZL         GPIO_BTN_SCANC
-#define GPIO_BTN_R          GPIO_BTN_SCANC
-#define GPIO_BTN_ZR         GPIO_BTN_SCANC
-#define GPIO_BTN_START      GPIO_BTN_SCANC
-#define GPIO_BTN_SELECT     GPIO_NUM_2
-#define GPIO_BTN_HOME       GPIO_BTN_SCANC
-#define GPIO_BTN_CAPTURE    GPIO_BTN_SCANC
+float A_cal[6] = {-4808.0, -6314.0, 9598.0, 1.000, 1.000, 1.000}; // 0..2 offset xyz, 3..5 scale xyz
 
-// Buttons that are outside of the keypad scanning config
-#define GPIO_BTN_STICKL     GPIO_NUM_22
-#define GPIO_BTN_STICKR     GPIO_NUM_21
-#define GPIO_BTN_SYNC       GPIO_NUM_16
+float G_off[3] = {234.0, -54.0, -40.0};            // raw offsets, determined for gyro at rest
+#define gscale ((250. / 32768.0) * (M_PI / 180.0)) // gyro default 250 LSB per d/s -> rad/s
 
-// Input pin mask creation for keypad scanning setup
-#define GPIO_INPUT_PIN_MASK     ( (1ULL<<GPIO_BTN_SCANA) | (1ULL<<GPIO_BTN_SCANB) | (1ULL<<GPIO_BTN_SCANC) | (1ULL<<GPIO_BTN_SCAND) | (1ULL<<GPIO_BTN_SELECT) )
-#define GPIO_INPUT_PORT_MASK    ( (1ULL<< GPIO_BTN_PULLA) | (1ULL<<GPIO_BTN_PULLB) | (1ULL<<GPIO_BTN_PULLC) | (1ULL<<GPIO_BTN_PULLD) )
+// ^^^^^^^^^^^^^^^^^^^ VERY IMPORTANT ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-// Masks to clear all relevant bits when doing keypad scan
-#define GPIO_INPUT_CLEAR0_MASK  ( (1ULL<< GPIO_BTN_PULLA) | (1ULL<<GPIO_BTN_PULLB) | (1ULL<<GPIO_BTN_PULLD) )
-#define GPIO_INPUT_CLEAR1_MASK  ( (1ULL<<(GPIO_BTN_PULLC-32)) )
+static float deltat = 0;                // loop time in seconds
+static unsigned long now = 0, last = 0; // micros() timers
 
-// ADC channel for battery voltage reading
-#define ADC_BATTERY_LVL     ADC1_CHANNEL_0
+// GLOBALLY DECLARED, required for Mahony filter
+// vector to hold quaternion
+float q[4] = {1.0, 0.0, 0.0, 0.0};
 
-// Variables used to store register reads
-uint32_t regread_low = 0;
-uint32_t regread_high = 0;
+// Free parameters in the Mahony filter and fusion scheme,
+// Kp for proportional feedback, Ki for integral
+float Kp = 20.0;
+float Ki = 0.0;
 
-// Reboot system properly.
-void enter_reboot()
+// globals for AHRS loop timing
+unsigned long now_ms, last_ms = 0; // millis() timers
+
+float yaw, pitch, roll; // Euler angle output
+
+#define MPU6500_SENSOR_ADDR 0x68 /*!< Slave address of the MPU6500 sensor */
+#define MPU6500_PWR_MGMT_1_REG 0x6B
+#define MPU6500_WHO_AM_I_REG 0x75
+#define MPU6500_READING_DATA_REG 0x3B
+#define MPU6500_USER_CTL_REG 0x6A
+
+#define SAMPLE_PERIOD_MS 100
+
+#define GPIO_BTN_A GPIO_NUM_23
+#define GPIO_BTN_B GPIO_NUM_25
+#define GPIO_BTN_X GPIO_NUM_26
+#define GPIO_BTN_Y GPIO_NUM_27
+
+#define GPIO_BTN_L GPIO_NUM_21
+#define GPIO_BTN_ZL GPIO_NUM_3
+#define GPIO_BTN_R GPIO_NUM_22
+#define GPIO_BTN_ZR GPIO_NUM_5
+#define GPIO_BTN_STICKL GPIO_NUM_16
+#define GPIO_BTN_STICKR GPIO_NUM_17
+
+#define GPIO_BTN_DU GPIO_NUM_12
+#define GPIO_BTN_DD GPIO_NUM_13
+#define GPIO_BTN_DL GPIO_NUM_14
+#define GPIO_BTN_DR GPIO_NUM_15
+
+#define GPIO_BTN_SYNC GPIO_NUM_4
+#define GPIO_BTN_START GPIO_NUM_5
+#define GPIO_BTN_SELECT GPIO_NUM_15
+#define GPIO_BTN_HOME GPIO_NUM_17
+
+#define ADC_STICK_LX ADC1_CHANNEL_4 /*!< ADC1 channel 4 is GPIO32 */
+#define ADC_STICK_LY ADC1_CHANNEL_5 /*!< ADC1 channel 5 is GPIO33 */
+// #define ADC_STICK_RX     ADC1_CHANNEL_6
+// #define ADC_STICK_RY     ADC1_CHANNEL_7
+
+#define GPIO_INPUT_PIN_MASK ((1ULL << GPIO_BTN_A) | (1ULL << GPIO_BTN_B) | (1ULL << GPIO_BTN_X) | (1ULL << GPIO_BTN_Y) | (1ULL << GPIO_BTN_L) | (1ULL << GPIO_BTN_ZL) | (1ULL << GPIO_BTN_R) | (1ULL << GPIO_BTN_ZR) | (1ULL << GPIO_BTN_STICKL) | (1ULL << GPIO_BTN_STICKR) | (1ULL << GPIO_BTN_DU) | (1ULL << GPIO_BTN_DD) | (1ULL << GPIO_BTN_DL) | (1ULL << GPIO_BTN_DR) | (1ULL << GPIO_BTN_SYNC) | (1ULL << GPIO_BTN_START) | (1ULL << GPIO_BTN_SELECT) | (1ULL << GPIO_BTN_HOME))
+
+hoja_controller_mode_t CURENT_CONTROLLER_MODE;
+
+//--------------------------------------------------------------------------------------------------
+// Mahony scheme uses proportional and integral filtering on
+// the error between estimated reference vector (gravity) and measured one.
+// Madgwick's implementation of Mayhony's AHRS algorithm.
+// See: http://www.x-io.co.uk/node/8#open_source_ahrs_and_imu_algorithms
+//
+// Date      Author      Notes
+// 29/09/2011 SOH Madgwick    Initial release
+// 02/10/2011 SOH Madgwick  Optimised for reduced CPU load
+// last update 07/09/2020 SJR minor edits
+//--------------------------------------------------------------------------------------------------
+// IMU algorithm update
+
+void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, float deltat)
 {
-    led_animator_send(LEDANIM_FADETO, COLOR_BLACK);
-    vTaskDelay(250/portTICK_PERIOD_MS);
-    util_battery_set_charge_rate(35);
-    esp_restart();
-}
+    float recipNorm;
+    float vx, vy, vz;
+    float ex, ey, ez; // error terms
+    float qa, qb, qc;
+    static float ix = 0.0, iy = 0.0, iz = 0.0; // integral feedback terms
+    float tmp;
 
-// Sleep mode should check the charge level every 30 seconds or so. 
-void enter_sleep()
-{
-    led_animator_send(LEDANIM_FADETO, COLOR_BLACK);
-    vTaskDelay(250/portTICK_PERIOD_MS);
-    util_battery_enable_ship_mode();
-}
-
-TaskHandle_t local_battery_TaskHandle = NULL;
-// Bool to store whether we should do LED charging update
-bool charge_display = false;
-
-#define VOLTAGE_MAX_READ 2350
-#define VOLTAGE_MIN_READ VOLTAGE_MAX_READ-255
-void local_get_battery_task(void * params)
-{
-    const char* TAG = "local_get_battery_task";
-    ESP_LOGI(TAG, "Starting local battery get task...");
-    for(;;)
+    // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
+    tmp = ax * ax + ay * ay + az * az;
+    if (tmp > 0.0)
     {
-        int lvl = adc1_get_raw(ADC_BATTERY_LVL);
-        //ESP_LOGI(TAG, "%d", (unsigned int) lvl);
-        lvl = lvl - VOLTAGE_MIN_READ;
-        
-        if (lvl > 255)
+
+        // Normalise accelerometer (assumed to measure the direction of gravity in body frame)
+        recipNorm = 1.0 / sqrt(tmp);
+        ax *= recipNorm;
+        ay *= recipNorm;
+        az *= recipNorm;
+
+        // Estimated direction of gravity in the body frame (factor of two divided out)
+        vx = q[1] * q[3] - q[0] * q[2]; // to normalize these terms, multiply each by 2.0
+        vy = q[0] * q[1] + q[2] * q[3];
+        vz = q[0] * q[0] - 0.5f + q[3] * q[3];
+
+        // Error is cross product between estimated and measured direction of gravity in body frame
+        // (half the actual magnitude)
+        ex = (ay * vz - az * vy);
+        ey = (az * vx - ax * vz);
+        ez = (ax * vy - ay * vx);
+
+        // Compute and apply to gyro term the integral feedback, if enabled
+        if (Ki > 0.0f)
         {
-            lvl = 255;
+            ix += Ki * ex * deltat; // integral error scaled by Ki
+            iy += Ki * ey * deltat;
+            iz += Ki * ez * deltat;
+            gx += ix; // apply integral feedback
+            gy += iy;
+            gz += iz;
         }
-        else if (lvl < 0)
-        {
-            lvl = 0;
-        }
-        uint8_t out_lvl = 255-lvl;
 
-        //ESP_LOGI(TAG, "%d", (unsigned int) out_lvl);
-
-        hoja_set_battery_level(out_lvl);
-
-        vTaskDelay(1500/portTICK_PERIOD_MS);
+        // Apply proportional feedback to gyro term
+        gx += Kp * ex;
+        gy += Kp * ey;
+        gz += Kp * ez;
     }
+
+    // Integrate rate of change of quaternion, q cross gyro term
+    deltat = 0.5 * deltat;
+    gx *= deltat; // pre-multiply common factors
+    gy *= deltat;
+    gz *= deltat;
+    qa = q[0];
+    qb = q[1];
+    qc = q[2];
+    q[0] += (-qb * gx - qc * gy - q[3] * gz);
+    q[1] += (qa * gx + qc * gz - q[3] * gy);
+    q[2] += (qa * gy - qb * gz + q[3] * gx);
+    q[3] += (qa * gz + qb * gy - qc * gx);
+
+    // renormalise quaternion
+    recipNorm = 1.0 / sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    q[0] = q[0] * recipNorm;
+    q[1] = q[1] * recipNorm;
+    q[2] = q[2] * recipNorm;
+    q[3] = q[3] * recipNorm;
+}
+
+static esp_err_t MPU6500_register_read(uint8_t reg_addr, uint8_t *data, size_t len)
+{
+    return i2c_master_write_read_device(I2C_MASTER_NUM, MPU6500_SENSOR_ADDR, &reg_addr, 1, data, len, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+}
+
+static esp_err_t MPU6500_register_write_byte(uint8_t reg_addr, uint8_t data)
+{
+    int ret;
+    uint8_t write_buf[2] = {reg_addr, data};
+
+    ret = i2c_master_write_to_device(I2C_MASTER_NUM, MPU6500_SENSOR_ADDR, write_buf, sizeof(write_buf), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+
+    return ret;
+}
+
+static esp_err_t i2c_master_init(void)
+{
+    int i2c_master_port = I2C_MASTER_NUM;
+
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ,
+    };
+
+    i2c_param_config(i2c_master_port, &conf);
+
+    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
 // Set up function to update inputs
-// Used to determine delay period between each scan (microseconds)
-#define US_READ  15
 void local_button_cb()
 {
-    // First set port D as low output
-    GPIO.out_w1tc = (uint32_t) (1ULL<<GPIO_BTN_PULLD);
-    ets_delay_us(US_READ);
+    ets_delay_us(15);
 
     // Read the GPIO registers and mask the data
-    regread_low = REG_READ(GPIO_IN_REG) & GPIO_INPUT_PIN_MASK;
-    regread_high = REG_READ(GPIO_IN1_REG);
+    uint32_t regread_low = REG_READ(GPIO_IN_REG);
+    uint32_t regread_high = REG_READ(GPIO_IN1_REG);
 
-    // Y button
-    hoja_button_data.button_left    = !util_getbit(regread_low, GPIO_BTN_Y);
-    // Dpad Down
-    hoja_button_data.dpad_down      = !util_getbit(regread_high, GPIO_BTN_DD);
-    // L trigger
-    hoja_button_data.trigger_l      = !util_getbit(regread_low, GPIO_BTN_L);
+    hoja_button_data.button_right = !util_getbit(regread_low, GPIO_BTN_A);
+    hoja_button_data.button_down = !util_getbit(regread_low, GPIO_BTN_B);
+    hoja_button_data.button_up = !util_getbit(regread_low, GPIO_BTN_X);
+    hoja_button_data.button_left = !util_getbit(regread_low, GPIO_BTN_Y);
 
-    // Release port D Set port C
-    GPIO.out_w1ts = (uint32_t) (1ULL<<GPIO_BTN_PULLD);
-    GPIO.out_w1tc = (uint32_t) (1ULL<<GPIO_BTN_PULLC);
-    //GPIO.out1_w1tc.val = (uint32_t) 0x1; //GPIO_BTN_PULLC
-    ets_delay_us(US_READ);
+    hoja_button_data.trigger_l = !util_getbit(regread_low, GPIO_BTN_L);
+    hoja_button_data.trigger_zl = !util_getbit(regread_low, GPIO_BTN_ZL);
+    hoja_button_data.trigger_r = !util_getbit(regread_low, GPIO_BTN_R);
+    hoja_button_data.trigger_zr = !util_getbit(regread_low, GPIO_BTN_ZR);
+    hoja_button_data.button_stick_left = !util_getbit(regread_low, GPIO_BTN_STICKL);
+    hoja_button_data.button_stick_right = !util_getbit(regread_low, GPIO_BTN_STICKR);
 
-    // Read the GPIO registers and mask the data
-    regread_low = REG_READ(GPIO_IN_REG) & GPIO_INPUT_PIN_MASK;
-    regread_high = REG_READ(GPIO_IN1_REG);
+    hoja_button_data.dpad_up = !util_getbit(regread_low, GPIO_BTN_DU);
+    hoja_button_data.dpad_down = !util_getbit(regread_low, GPIO_BTN_DD);
+    hoja_button_data.dpad_left = !util_getbit(regread_low, GPIO_BTN_DL);
+    hoja_button_data.dpad_right = !util_getbit(regread_low, GPIO_BTN_DR);
 
-    // X button
-    hoja_button_data.button_up      = !util_getbit(regread_low, GPIO_BTN_X);
-    // Dpad Down
-    hoja_button_data.dpad_left      = !util_getbit(regread_high, GPIO_BTN_DL);
+    hoja_button_data.button_pair = !util_getbit(regread_low, GPIO_BTN_SYNC);
+    hoja_button_data.button_start = !util_getbit(regread_low, GPIO_BTN_START);
+    hoja_button_data.button_select = !util_getbit(regread_low, GPIO_BTN_SELECT);
+    hoja_button_data.button_home = !util_getbit(regread_low, GPIO_BTN_HOME);
+}
 
-    // Release port C set port B
-    GPIO.out_w1ts = (uint32_t) (1ULL<<GPIO_BTN_PULLC);
-    GPIO.out_w1tc = (uint32_t) (1ULL<<GPIO_BTN_PULLB);
-    ets_delay_us(US_READ);
-
-    // Read the GPIO registers and mask the data
-    regread_low = REG_READ(GPIO_IN_REG) & GPIO_INPUT_PIN_MASK;
-    regread_high = REG_READ(GPIO_IN1_REG);
-
-    // B button
-    hoja_button_data.button_down    = !util_getbit(regread_low, GPIO_BTN_B);
-    // Dpad Up
-    hoja_button_data.dpad_up        = !util_getbit(regread_high, GPIO_BTN_DU);
-    // Start button
-    hoja_button_data.button_start   = !util_getbit(regread_low, GPIO_BTN_START);
-
-    // Release port B set port A
-    GPIO.out_w1ts = (uint32_t) (1ULL<<GPIO_BTN_PULLB);
-    GPIO.out1_w1tc.val = (uint32_t) (1ULL << 1);
-    ets_delay_us(US_READ);
-
-    // Read the GPIO registers and mask the data
-    regread_low = REG_READ(GPIO_IN_REG) & GPIO_INPUT_PIN_MASK;
-    regread_high = REG_READ(GPIO_IN1_REG);
-    
-    // Release port A
-    GPIO.out1_w1ts.val = (uint32_t) (1ULL << 1);
-
-    // A button
-    hoja_button_data.button_right   = !util_getbit(regread_low, GPIO_BTN_A);
-    // Dpad Right
-    hoja_button_data.dpad_right     = !util_getbit(regread_high, GPIO_BTN_DR);
-    // R trigger
-    hoja_button_data.trigger_r      = !util_getbit(regread_low, GPIO_BTN_R);
-
-    // Read select button (not tied to matrix)
-    hoja_button_data.button_select  = !util_getbit(regread_low, GPIO_BTN_SELECT);
-
-    // Reset macros
-    hoja_button_data.button_capture = 0;
-    hoja_button_data.button_home    = 0;
-    hoja_button_data.button_pair    = 0;
-    hoja_button_data.button_sleep   = 0;
-    hoja_button_data.trigger_zl     = 0;
-    hoja_button_data.trigger_zr     = 0;
-
-
-    // Tie the select button to our sleep button.
-    if (hoja_button_data.button_select)
+uint16_t fudge_reading(uint16_t raw_reading, bool invert)
+{
+    if (invert)
     {
-        hoja_button_data.button_sleep = 1;
+        raw_reading = 4095 - raw_reading;
     }
 
-    // Tie the start button to our sleep button
-    if (hoja_button_data.button_start)
+    int midpoint = 2048;
+    int deadzone = 250;
+    if (((midpoint - deadzone) < raw_reading) && (raw_reading < (midpoint + deadzone)))
     {
-        hoja_button_data.button_pair = 1;
+        return midpoint;
     }
+    return raw_reading;
+}
 
-    if (hoja_button_data.button_start && hoja_button_data.trigger_l)
-    {
-        hoja_button_data.trigger_l = 0;
-        hoja_button_data.button_start = 0;
-        hoja_button_data.button_capture = 1;
-    }
+uint16_t fix_yaw(float yaaw)
+{
+    float rotate = fmod((yaaw + 180), 360.0); // rotate so 180 is midpoint
 
-    if (hoja_button_data.button_start && hoja_button_data.trigger_r)
-    {
-        hoja_button_data.trigger_r = 0;
-        hoja_button_data.button_start = 0;
-        hoja_button_data.button_home = 1;
-    }
+    return (uint16_t)(rotate);
+}
 
-    if (hoja_button_data.button_select && hoja_button_data.trigger_l)
-    {
-        hoja_button_data.trigger_l = 0;
-        hoja_button_data.button_select = 0;
-        hoja_button_data.trigger_zl = 1;
-    }
+void UpdateReadings()
+{
+    MPU6500_register_read(MPU6500_READING_DATA_REG, i2cData, 14);
 
-    if (hoja_button_data.button_select && hoja_button_data.trigger_r)
-    {
-        hoja_button_data.trigger_r = 0;
-        hoja_button_data.button_select = 0;
-        hoja_button_data.trigger_zr = 1;
-    }
+    ax = ((i2cData[0] << 8) | i2cData[1]);
+    ay = ((i2cData[2] << 8) | i2cData[3]);
+    az = ((i2cData[4] << 8) | i2cData[5]);
+    gx = ((i2cData[8] << 8) | i2cData[9]);
+    gy = ((i2cData[10] << 8) | i2cData[11]);
+    gz = ((i2cData[12] << 8) | i2cData[13]);
+}
+
+void newshit()
+{
+    float Axyz[3];
+    float Gxyz[3];
+
+    Axyz[0] = (float)ax;
+    Axyz[1] = (float)ay;
+    Axyz[2] = (float)az;
+
+    // apply offsets and scale factors from Magneto
+    for (int i = 0; i < 3; i++)
+        Axyz[i] = (Axyz[i] - A_cal[i]) * A_cal[i + 3];
+
+    Gxyz[0] = ((float)gx - G_off[0]) * gscale; // 250 LSB(d/s) default to radians/s
+    Gxyz[1] = ((float)gy - G_off[1]) * gscale;
+    Gxyz[2] = ((float)gz - G_off[2]) * gscale;
+
+    now = esp_timer_get_time();
+    deltat = (now - last) * 1.0e-6; // seconds since last update
+    last = now;
+    Mahony_update(Axyz[0], Axyz[1], Axyz[2], Gxyz[0], Gxyz[1], Gxyz[2], deltat);
+
+    // Compute Tait-Bryan angles. Strictly valid only for approximately level movement
+
+    // In this coordinate system, the positive z-axis is up, X north, Y west.
+    // Yaw is the angle between Sensor x-axis and Earth magnetic North
+    // (or true North if corrected for local declination, looking down on the sensor
+    // positive yaw is counterclockwise, which is not conventional for NED navigation.
+    // Pitch is angle between sensor x-axis and Earth ground plane, toward the
+    // Earth is positive, up toward the sky is negative. Roll is angle between
+    // sensor y-axis and Earth ground plane, y-axis up is positive roll. These
+    // arise from the definition of the homogeneous rotation matrix constructed
+    // from quaternions. Tait-Bryan angles as well as Euler angles are
+    // non-commutative; that is, the get the correct orientation the rotations
+    // must be applied in the correct order which for this configuration is yaw,
+    // pitch, and then roll.
+    // http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
+    // which has additional links.
+
+    // WARNING: This angular conversion is for DEMONSTRATION PURPOSES ONLY. It WILL
+    // MALFUNCTION for certain combinations of angles! See https://en.wikipedia.org/wiki/Gimbal_lock
+
+    roll = atan2((q[0] * q[1] + q[2] * q[3]), 0.5 - (q[1] * q[1] + q[2] * q[2]));
+    pitch = asin(2.0 * (q[0] * q[2] - q[1] * q[3]));
+    // conventional yaw increases clockwise from North. Not that the MPU-6500 knows where North is.
+    yaw = -atan2((q[1] * q[2] + q[0] * q[3]), 0.5 - (q[2] * q[2] + q[3] * q[3]));
+    // to degrees
+    yaw *= 180.0 / M_PI;
+    if (yaw < 0)
+        yaw += 360.0; // compass circle
+    // if (yaw >= 360)
+    //     yaw -= 360.0; // compass circle
+    pitch *= 180.0 / M_PI;
+    roll *= 180.0 / M_PI;
 }
 
 // Separate task to read sticks.
@@ -241,604 +322,318 @@ void local_button_cb()
 // scanned once between each polling interval. This varies from core to core.
 void local_analog_cb()
 {
-    const char* TAG = "stick_task";
-    // read stick 1 and 2
+    UpdateReadings();
+    newshit();
 
-    /*
-    hoja_analog_data.ls_x = (uint16_t) adc1_get_raw(ADC_STICK_LX);
-    hoja_analog_data.rs_x = (uint16_t) adc1_get_raw(ADC_STICK_RX);
-    hoja_analog_data.rs_y = (uint16_t) adc1_get_raw(ADC_STICK_RY);
-    */
+    // read stick 1
+    hoja_analog_data.rs_x = -fix_yaw(yaw);
+    hoja_analog_data.rs_y = (roll - 180);
 
-    hoja_analog_data.ls_x = 2048;
-    hoja_analog_data.ls_y = 2048;
+    hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), true );
+    hoja_analog_data.ls_y = fudge_reading(adc1_get_raw(ADC_STICK_LY), CURENT_CONTROLLER_MODE != HOJA_CONTROLLER_MODE_NS);
 
-    hoja_analog_data.rs_x = 2048;
-    hoja_analog_data.rs_y = 2048;
+    // if (hoja_button_data.trigger_zl == 1) {hoja_analog_data.lt_a = 255;}
+    // hoja_analog_data.lt_a = (hoja_button_data.trigger_zl) ? 255 : 0;
 
     // Set analog triggers
-    hoja_analog_data.lt_a = (hoja_processed_buttons.trigger_zl) ? DPAD_ANALOG_POS : 0;
-    hoja_analog_data.rt_a = (hoja_processed_buttons.trigger_zr) ? DPAD_ANALOG_POS : 0;
-}
-
-// Handle System events
-void local_system_evt(hoja_system_event_t evt, uint8_t param)
-{
-    const char* TAG = "local_system_evt";
-    switch(evt)
-    {
-        esp_err_t err = ESP_OK;
-
-        // Called after API initialize function
-        case HEVT_API_INIT_OK:
-        {
-            ESP_LOGI(TAG, "HOJA initialized OK callback.");
-
-            local_button_cb();
-            local_button_cb();
-
-            if (hoja_button_data.button_pair)
-            {
-                hoja_set_force_wired(true);
-            }
-            else
-            {
-                hoja_set_force_wired(false);
-            }
-
-            // Check to see what buttons are being held. Adjust state accordingly.
-            if (hoja_button_data.button_left)
-            {
-                if (loaded_settings.controller_mode != HOJA_CONTROLLER_MODE_RETRO)
-                {
-                    loaded_settings.controller_mode = HOJA_CONTROLLER_MODE_RETRO;
-                    hoja_settings_saveall();
-                }
-            }
-            else if (hoja_button_data.button_right)
-            {
-                if (loaded_settings.controller_mode != HOJA_CONTROLLER_MODE_NS)
-                {
-                    loaded_settings.controller_mode = HOJA_CONTROLLER_MODE_NS;
-                    hoja_settings_saveall();
-                }
-            }
-            else if (hoja_button_data.button_up)
-            {
-                if (loaded_settings.controller_mode != HOJA_CONTROLLER_MODE_XINPUT)
-                {
-                    loaded_settings.controller_mode = HOJA_CONTROLLER_MODE_XINPUT;
-                    hoja_settings_saveall();
-                }
-            }
-            else if (hoja_button_data.button_down)
-            {
-                if (loaded_settings.controller_mode != HOJA_CONTROLLER_MODE_DINPUT)
-                {
-                    loaded_settings.controller_mode = HOJA_CONTROLLER_MODE_DINPUT;
-                    hoja_settings_saveall();
-                }
-            }
-
-            if (loaded_settings.controller_mode == HOJA_CONTROLLER_MODE_RETRO)
-            {
-                ESP_LOGI(TAG, "Starting N64 Cold boot operation...");
-                core_joybus_n64_coldboot();
-                util_battery_set_charge_rate(35);
-            }
-
-            else
-            {
-                // Get boot mode and it will perform a callback.
-                err = util_battery_boot_status();
-                if (err != HOJA_OK)
-                {
-                    ESP_LOGE(TAG, "Issue when getting boot battery status.");
-                }
-            }
-        }
-            break;
-        
-        // Called when shutdown triggers from input loop
-        case HEVT_API_SHUTDOWN:
-        {
-            ESP_LOGI(TAG, "HEV_API_SHUTDOWN");
-            enter_sleep();
-        }
-            break;
-        
-        // Called when reboot is requested
-        case HEVT_API_REBOOT:
-        {
-            enter_reboot();
-        }
-            break;
-
-        case HEVT_API_PLAYERNUM:
-            // TO DO
-        {
-            if (param == 1)
-            {
-                led_animator_send(LEDANIM_FADETO, COLOR_RED);
-            }
-            else if (param == 2)
-            {
-                led_animator_send(LEDANIM_FADETO, COLOR_BLUE);
-            }
-            else if (param == 3)
-            {
-                led_animator_send(LEDANIM_FADETO, COLOR_GREEN);
-            }
-            else if (param == 4)
-            {
-                led_animator_send(LEDANIM_FADETO, COLOR_PURPLE);
-            }
-            else
-            {
-                led_animator_send(LEDANIM_FADETO, COLOR_ORANGE);
-            }
-
-        }
-            break;
-
-        case HEVT_API_RUMBLE:
-            // TO DO
-        {
-
-        }
-            break;
-
-        default:
-            ESP_LOGI(TAG, "Unknown event type: %d", evt);
-            break;
-
-    }
-}
-
-void local_bt_evt(hoja_bt_event_t evt)
-{
-    const char* TAG = "local_bt_evt";
-
-    switch (evt)
-    {
-        default:
-            ESP_LOGI(TAG, "Unknown bt event");
-            break;
-
-        case HEVT_BT_STARTED:
-            ESP_LOGI(TAG, "BT Started OK.");
-            break;
-
-        case HEVT_BT_CONNECTING:
-            ESP_LOGI(TAG, "Connecting BT...");
-            break;
-
-        case HEVT_BT_PAIRING:
-            ESP_LOGI(TAG, "Pairing BT Device.");
-            break;
-
-        case HEVT_BT_CONNECTED:
-            ESP_LOGI(TAG, "BT Device Connected.");
-            led_animator_send(LEDANIM_FADETO, mode_color);
-            break;
-
-        case HEVT_BT_DISCONNECTED:
-            ESP_LOGI(TAG, "BT Device Disconnected.");
-            
-            break;
-    }
-}
-
-void local_usb_evt(hoja_usb_event_t evt)
-{
-    switch (evt)
-    {
-        default:
-        case HEVT_USB_DISCONNECTED:
-            if (util_battery_has_external_power())
-            {
-                charge_display = true;
-                led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-            }
-            else
-            {
-                enter_sleep();
-            }
-            break;
-
-        case HEVT_USB_CONNECTED:
-            charge_display = false;
-            led_animator_send(LEDANIM_FADETO, mode_color);
-            break;
-    }
-}
-
-// Events from the wired utility
-void local_wired_evt(hoja_wired_event_t evt)
-{
-    const char* TAG = "local_wired_evt";
-    hoja_err_t err = HOJA_OK;
-
-    switch(evt)
-    {
-        default:
-        case HEVT_WIRED_NO_DETECT:
-            err = HOJA_FAIL;
-            break;
-        
-        case HEVT_WIRED_SNES_DETECT:
-            hoja_set_core(HOJA_CORE_SNES);
-            led_animator_send(LEDANIM_FADETO, COLOR_BLACK);
-            vTaskDelay(100/portTICK_PERIOD_MS);
-            led_animator_send(LEDANIM_FADETO, COLOR_WHITE);
-            
-            err = hoja_start_core();
-            break;
-
-        case HEVT_WIRED_N64_DETECT:
-            hoja_load_remap(joybus_map.val);
-            hoja_set_dpad_mode(DPAD_MODE_ANALOGONLY);
-            led_animator_send(LEDANIM_FADETO, COLOR_TEAL);
-            break;
-
-        case HEVT_WIRED_N64_DECONFIRMED:
-            err = util_wired_detect_loop();
-            if (!err)
-            {
-                ESP_LOGI(TAG, "Started wired retro loop OK.");
-                led_animator_send(LEDANIM_BLINK, COLOR_ORANGE);
-            }
-            else
-            {
-                ESP_LOGE(TAG, "Failed to start wired retro loop.");
-            }
-            break;
-
-        case HEVT_WIRED_GAMECUBE_DETECT:
-            hoja_set_core(HOJA_CORE_GAMECUBE);
-            led_animator_send(LEDANIM_FADETO, COLOR_BLACK);
-            vTaskDelay(100/portTICK_PERIOD_MS);
-            led_animator_send(LEDANIM_FADETO, COLOR_PURPLE);
-            hoja_load_remap(joybus_map.val);
-            hoja_set_dpad_mode(DPAD_MODE_ANALOGONLY);
-            err = hoja_start_core();
-
-            break;
-    }
-}
-
-void local_battery_evt(hoja_battery_event_t evt, uint8_t param)
-{
-    const char* TAG = "local_battery_evt";
-    hoja_err_t err = HOJA_OK;
-
-    switch(evt)
-    {
-        case HEVT_BATTERY_CHARGING:
-            ESP_LOGI(TAG, "Battery is charging.");
-            charge_color.rgb = COLOR_GREEN.rgb;
-            if(charge_display)
-            {
-                led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-            }
-            break;
-
-        case HEVT_BATTERY_CHARGECOMPLETE:
-            ESP_LOGI(TAG, "Battery charging completed.");
-            charge_color.rgb = COLOR_BLUE.rgb;
-            if(charge_display)
-            {
-                led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-            }
-            break;
-
-        case HEVT_BATTERY_NOCHARGE:
-            ESP_LOGI(TAG, "Battery not charging.");
-            charge_color.rgb = COLOR_RED.rgb;
-            if(charge_display)
-            {
-                led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-            }
-            break;
-
-        default:
-        case HEVT_BATTERY_LVLCHANGE:
-            // Not implemented
-            ESP_LOGE(TAG, "Not implemented.");
-            break;
-    }
-}
-
-void local_charger_evt(hoja_charger_event_t evt)
-{
-    const char* TAG = "local_charger_evt";
-    switch(evt)
-    {
-        case HEVT_CHARGER_PLUGGED:
-            ESP_LOGI(TAG, "Charger plugged in.");
-            if(charge_display)
-            {
-                led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-            }
-            break;
-        case HEVT_CHARGER_UNPLUGGED:
-            ESP_LOGI(TAG, "Charger unplugged.");
-            enter_sleep();
-            break;
-    }
+    // hoja_analog_data.lt_a = (hoja_processed_buttons.trigger_zl) ? DPAD_ANALOG_POS : 0;
+    // hoja_analog_data.rt_a = (hoja_processed_buttons.trigger_zr) ? DPAD_ANALOG_POS : 0;
+    // hoja_analog_data.lt_a = 2048;
+    // hoja_analog_data.rt_a = 2048;
 }
 
 void local_boot_evt(hoja_boot_event_t evt)
 {
     esp_err_t err;
-    const char* TAG = "local_boot_evt";
+    const char *TAG = "local_boot_evt";
+    ESP_LOGI(TAG, "called local_boot_evt");
 
-    switch(evt)
+    switch (evt)
     {
-        // With no battery connected
-        case HEVT_BOOT_NOBATTERY:
-            ESP_LOGI(TAG, "No battery detected.");
-        case HEVT_BOOT_PLUGGED:
+    // With no battery connected
+    case HEVT_BOOT_NOBATTERY:
+        ESP_LOGI(TAG, "No battery detected.");
+    case HEVT_BOOT_PLUGGED:
+    {
+        ESP_LOGI(TAG, "Plugged in on boot.");
+
+        switch (loaded_settings.controller_mode)
         {
-            ESP_LOGI(TAG, "Plugged in on boot.");
-            charge_display = true;
-
-            switch(loaded_settings.controller_mode)
-            {
-                case HOJA_CONTROLLER_MODE_RETRO:
-                {
-                    charge_display = false;
-                    util_battery_set_charge_rate(35);
-                }
-                    break;
-
-                default:
-                case HOJA_CONTROLLER_MODE_DINPUT:
-                {
-                    util_battery_set_charge_rate(100);
-                    hoja_set_core(HOJA_CORE_USB);
-                    core_usb_set_subcore(USB_SUBCORE_DINPUT);
-
-                    mode_color.rgb = COLOR_BLUE.rgb;
-                    led_animator_send(LEDANIM_FADETO, mode_color);
-
-                    err = hoja_start_core();
-
-                    if (err == HOJA_OK)
-                    {
-
-                    }
-                    else
-                    {
-
-                    }
-                }
-                    break;
-
-                case HOJA_CONTROLLER_MODE_XINPUT:
-                {
-                    util_battery_set_charge_rate(100);
-
-                    hoja_set_core(HOJA_CORE_USB);
-                    core_usb_set_subcore(USB_SUBCORE_XINPUT);
-
-                    mode_color.rgb = COLOR_GREEN.rgb;
-                    led_animator_send(LEDANIM_FADETO, mode_color);
-
-                    err = hoja_start_core();
-
-                    if (err == HOJA_OK)
-                    {
-
-                    }
-                }
-                    break;
-                
-                case HOJA_CONTROLLER_MODE_NS:
-                {
-                    util_battery_set_charge_rate(100);
-
-                    hoja_set_core(HOJA_CORE_USB);
-                    core_usb_set_subcore(USB_SUBCORE_NS);
-
-                    mode_color.rgb = COLOR_YELLOW.rgb;
-                    led_animator_send(LEDANIM_FADETO, mode_color);
-
-                    err = hoja_start_core();
-
-                    if (err == HOJA_OK)
-                    {
-
-                    }
-                    else
-                    {
-
-                    }
-
-                }
-                    break;
-            }
-
-            // Start battery monitor utility
-            util_battery_start_monitor();
-
-            vTaskDelay(200/portTICK_PERIOD_MS);
-            if(charge_display)
-            {
-                uint8_t stat = util_battery_get_charging_status();
-                if ((stat == BATSTATUS_UNDEFINED) || (stat == BATSTATUS_NOTCHARGING))
-                {
-                    charge_color.rgb = COLOR_RED.rgb;
-                    led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-                }
-                else if ((stat == BATSTATUS_TRICKLEFAST) || (stat == BATSTATUS_CONSTANT))
-                {
-                    charge_color.rgb = COLOR_GREEN.rgb;
-                    led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-                }
-                else if(stat == BATSTATUS_COMPLETED)
-                {
-                    charge_color.rgb = COLOR_BLUE.rgb;
-                    led_animator_send(LEDANIM_BATTERY_BREATHE, charge_color);
-                }
-            }
-            
-        }
-            break;
-
-        // This case is reached if
-        // the controller is unplugged but has a battery
-        case HEVT_BOOT_UNPLUGGED:
+        case HOJA_CONTROLLER_MODE_DINPUT:
         {
-            ESP_LOGI(TAG, "Unplugged.");
-            // Do not show charger display changes.
-            charge_display = false;
+            ESP_LOGI(TAG, "HOJA_CONTROLLER_MODE_DINPUT");
 
-            if (hoja_get_force_wired())
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_DINPUT;
+            hoja_set_core(HOJA_CORE_BT_DINPUT);
+            // core_usb_set_subcore(USB_SUBCORE_DINPUT);
+
+            err = hoja_start_core();
+            if (err == HOJA_OK)
             {
-                // Boot as if we are wired if USB standby is enabled.
-                hoja_event_cb(HOJA_EVT_BOOT, HEVT_BOOT_PLUGGED, 0x00);
-                return;
             }
-
-            switch(loaded_settings.controller_mode)
+            else
             {
-                case HOJA_CONTROLLER_MODE_RETRO:
-                {
-                    util_battery_set_charge_rate(35);
-
-                    err = util_wired_detect_loop();
-                    if (!err)
-                    {
-                        ESP_LOGI(TAG, "Started wired retro loop OK.");
-                        led_animator_send(LEDANIM_BLINK, COLOR_ORANGE);
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "Failed to start wired retro loop.");
-                    }   
-                    
-                }
-                    break;
-
-                default:
-                case HOJA_CONTROLLER_MODE_DINPUT:
-                {
-                    util_battery_set_charge_rate(100);
-                    err = hoja_set_core(HOJA_CORE_BT_DINPUT);
-
-                    mode_color.rgb = COLOR_BLUE.rgb;
-                    led_animator_send(LEDANIM_BLINK, mode_color);
-
-                    err = hoja_start_core();
-
-                    if (err == HOJA_OK)
-                    {
-                        ESP_LOGI(TAG, "Started BT Dinput OK.");      
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "Failed to start Dinput BT.");
-                    }
-                }
-                    break;
-
-                case HOJA_CONTROLLER_MODE_NS:
-                {
-                    util_battery_set_charge_rate(100);
-                    core_ns_set_subcore(NS_TYPE_SNES);
-                    err = hoja_set_core(HOJA_CORE_NS);
-
-                    mode_color.rgb = COLOR_YELLOW.rgb;
-                    led_animator_send(LEDANIM_BLINK, mode_color);
-
-                    err = hoja_start_core();
-
-                    if (err == HOJA_OK)
-                    {
-                        ESP_LOGI(TAG, "Started BT Switch OK.");
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "Failed to start Switch BT.");
-                    }
-                }
-                    break;
-
-                case HOJA_CONTROLLER_MODE_XINPUT:
-                {
-                    util_battery_set_charge_rate(100);
-                    err = hoja_set_core(HOJA_CORE_BT_XINPUT);
-
-                    mode_color.rgb = COLOR_GREEN.rgb;
-                    led_animator_send(LEDANIM_BLINK, mode_color);
-
-                    err = hoja_start_core();
-
-                    if (err == HOJA_OK)
-                    {
-                        ESP_LOGI(TAG, "Started BT XInput OK.");
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "Failed to start XInput BT.");
-                    }
-                }
-                    break;
             }
-            
         }
-            break;
+        break;
+
+        default:
+        case HOJA_CONTROLLER_MODE_XINPUT:
+        {
+            ESP_LOGI(TAG, "HOJA_CONTROLLER_MODE_XINPUT");
+
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_XINPUT;
+            hoja_set_core(HOJA_CORE_BT_XINPUT);
+            // core_usb_set_subcore(USB_SUBCORE_XINPUT);
+
+            err = hoja_start_core();
+            if (err == HOJA_OK)
+            {
+            }
+            else
+            {
+            }
+        }
+        break;
+
+        case HOJA_CONTROLLER_MODE_NS:
+        {
+            ESP_LOGI(TAG, "Ninnedo switch mode config go.");
+
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_NS;
+            hoja_set_core(HOJA_CORE_NS);
+            core_ns_set_subcore(NS_TYPE_PROCON);
+
+            err = hoja_start_core();
+            if (err == HOJA_OK)
+            {
+            }
+            else
+            {
+            }
+        }
+        break;
+        }
+    }
+    break;
+
+    // This case is reached if
+    // the controller is unplugged but has a battery
+    case HEVT_BOOT_UNPLUGGED:
+    {
+        ESP_LOGI(TAG, "Unplugged.");
+
+        switch (loaded_settings.controller_mode)
+        {
+        case HOJA_CONTROLLER_MODE_DINPUT:
+        {
+            ESP_LOGI(TAG, "HOJA_CONTROLLER_MODE_DINPUT");
+            err = hoja_set_core(HOJA_CORE_BT_DINPUT);
+
+            err = hoja_start_core();
+
+            if (err == HOJA_OK)
+            {
+                ESP_LOGI(TAG, "Started BT Dinput OK.");
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed to start Dinput BT.");
+            }
+        }
+        break;
+
+        case HOJA_CONTROLLER_MODE_NS:
+        {
+            ESP_LOGI(TAG, "Nintedo switch mode config go.");
+            core_ns_set_subcore(NS_TYPE_PROCON);
+            err = hoja_set_core(HOJA_CORE_NS);
+
+            err = hoja_start_core();
+
+            if (err == HOJA_OK)
+            {
+                ESP_LOGI(TAG, "Started BT Switch OK.");
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed to start Switch BT.");
+            }
+        }
+        break;
+
+        default:
+        case HOJA_CONTROLLER_MODE_XINPUT:
+        {
+            ESP_LOGI(TAG, "HOJA_CONTROLLER_MODE_XINPUT");
+            err = hoja_set_core(HOJA_CORE_BT_XINPUT);
+
+            err = hoja_start_core();
+
+            if (err == HOJA_OK)
+            {
+                ESP_LOGI(TAG, "Started BT XInput OK.");
+            }
+            else
+            {
+                ESP_LOGE(TAG, "Failed to start XInput BT.");
+            }
+        }
+        break;
+        }
+    }
+    break;
+    }
+    ESP_LOGI(TAG, "finished local_boot_evt");
+}
+
+// Handle System events
+void local_system_evt(hoja_system_event_t evt, uint8_t param)
+{
+    const char *TAG = "local_system_evt";
+    ESP_LOGI(TAG, "called local_system_evt");
+    // util_battery_boot_status();
+    switch (evt)
+    {
+    // Called after API initialize function
+    case HEVT_API_INIT_OK:
+    {
+        ESP_LOGI(TAG, "case HEVT_API_INIT_OK");
+
+        local_button_cb();
+
+        ESP_LOGI(TAG, "hoja_set_force_wired");
+        hoja_set_force_wired(false);
+
+        // ESP_LOGI(TAG, "loaded_settings.controller_mode = %i", loaded_settings.controller_mode);
+        // if (loaded_settings.controller_mode != CURENT_CONTROLLER_MODE)
+        // {
+        //     ESP_LOGI(TAG, "loaded_settings.controller_mode");
+        //     loaded_settings.controller_mode = CURENT_CONTROLLER_MODE;
+        //     hoja_settings_saveall();
+        // }
+
+        // Check to see what buttons are being held. Adjust state accordingly.
+        if (hoja_button_data.button_left)
+        {
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_RETRO;
+        }
+        else if (hoja_button_data.button_right)
+        {
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_NS;
+        }
+        else if (hoja_button_data.button_up)
+        {
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_XINPUT;
+        }
+        else if (hoja_button_data.button_down)
+        {
+            CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_DINPUT;
+        }
+
+        if (loaded_settings.controller_mode != CURENT_CONTROLLER_MODE)
+        {
+            loaded_settings.controller_mode = CURENT_CONTROLLER_MODE;
+            hoja_settings_saveall();
+        }
+        local_boot_evt(HEVT_BOOT_PLUGGED);
+    }
+    break;
+
+    default:
+        ESP_LOGI(TAG, "Unknown event type: %d", evt);
+        break;
+    }
+    ESP_LOGI(TAG, "finished local_system_evt");
+}
+
+void local_bt_evt(hoja_bt_event_t evt)
+{
+    const char *TAG = "local_bt_evt";
+
+    switch (evt)
+    {
+    default:
+        ESP_LOGI(TAG, "Unknown bt event");
+        break;
+
+    case HEVT_BT_STARTED:
+        ESP_LOGI(TAG, "BT Started OK.");
+        break;
+
+    case HEVT_BT_CONNECTING:
+        ESP_LOGI(TAG, "Connecting BT...");
+        break;
+
+    case HEVT_BT_PAIRING:
+        ESP_LOGI(TAG, "Pairing BT Device.");
+        break;
+
+    case HEVT_BT_CONNECTED:
+        ESP_LOGI(TAG, "BT Device Connected.");
+        break;
+
+    case HEVT_BT_DISCONNECTED:
+        ESP_LOGI(TAG, "BT Device Disconnected.");
+
+        break;
     }
 }
 
 // Callback to handle HOJA events
 void local_event_cb(hoja_event_type_t type, uint8_t evt, uint8_t param)
-{   
-    const char* TAG = "local_event_cb";
+{
+    const char *TAG = "local_event_cb";
+    ESP_LOGI(TAG, "called local_event_cb");
 
-    switch(type)
+    switch (type)
     {
-        default:
-            ESP_LOGI(TAG, "Unrecognized event occurred: %X", (unsigned int) type);
-            break;
+    default:
+        ESP_LOGI(TAG, "Unrecognized event occurred: %X", (unsigned int)type);
+        break;
 
-        case HOJA_EVT_BOOT:
-            local_boot_evt(evt);
-            break;
+    case HOJA_EVT_BOOT:
+        ESP_LOGI(TAG, "HOJA_EVT_BOOT");
+        local_boot_evt(evt);
+        break;
 
-        case HOJA_EVT_SYSTEM:
-            local_system_evt(evt, param);
-            break;
+    case HOJA_EVT_SYSTEM:
+        ESP_LOGI(TAG, "HOJA_EVT_SYSTEM");
+        local_system_evt(evt, param);
+        break;
 
-        case HOJA_EVT_CHARGER:
-            local_charger_evt(evt);
-            break;
-
-        case HOJA_EVT_BT:
-            local_bt_evt(evt);
-            break;
-
-        case HOJA_EVT_BATTERY:
-            local_battery_evt(evt, param);
-            break;
-
-        case HOJA_EVT_USB:
-            local_usb_evt(evt);
-            break;
-
-        case HOJA_EVT_WIRED:
-            local_wired_evt(evt);
-            break;
+    case HOJA_EVT_BT:
+        ESP_LOGI(TAG, "HOJA_EVT_BT");
+        local_bt_evt(evt);
+        break;
     }
+    ESP_LOGI(TAG, "finished local_event_cb");
 }
 
-void app_main()
+void init_gyro()
 {
-    const char* TAG = "app_main";
+    ESP_ERROR_CHECK(i2c_master_init());
 
-    hoja_err_t err;
+    /* Read the MPU6500 WHO_AM_I register, on power up the register should have the value 0x70 */
+    ESP_ERROR_CHECK(MPU6500_register_read(MPU6500_WHO_AM_I_REG, i2cData, 1));
 
+    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x80); // reset config
+    vTaskDelay(1 * pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
+
+    i2cData[0] = 7;    // Set the sample rate to 1000Hz - 8kHz/(7+1) = 1000Hz
+    i2cData[1] = 0x00; // Disable FSYNC and set 260 Hz Acc filtering, 256 Hz Gyro filtering, 8 KHz sampling
+    i2cData[2] = 0x00; // Set Gyro Full Scale Range to ±250deg/s
+    i2cData[3] = 0x00; // Set Accelerometer Full Scale Range to ±2g
+
+    MPU6500_register_write_byte(0x19, *i2cData);               // set SMPLRT_DIV
+    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x01); // PLL with X axis gyroscope reference and disable sleep mode
+
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+    UpdateReadings();
+}
+
+void init_hoja()
+{
     // IO configuration we can reuse
     gpio_config_t io_conf = {};
 
@@ -849,32 +644,15 @@ void app_main()
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&io_conf);
 
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    io_conf.pin_bit_mask = GPIO_INPUT_PORT_MASK;
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    gpio_config(&io_conf);
-
-    GPIO.out_w1ts = GPIO_INPUT_CLEAR0_MASK;
-    GPIO.out1_w1ts.val = (uint32_t) 0x3;
-
-    // Set up ADC
-    ESP_ERROR_CHECK(adc1_config_width(ADC_WIDTH_BIT_DEFAULT));
-    ESP_ERROR_CHECK(adc1_config_channel_atten(ADC_BATTERY_LVL, ADC_ATTEN_DB_11));
-
-    util_i2c_initialize();
-    util_battery_set_type(BATTYPE_BQ25180);
-    util_battery_set_charge_rate(35);
-
-    led_animator_init();
-
     hoja_register_button_callback(local_button_cb);
     hoja_register_analog_callback(local_analog_cb);
     hoja_register_event_callback(local_event_cb);
-    hoja_button_remap_enable(true);
-    hoja_load_remap(0x00);
 
-    xTaskCreate(local_get_battery_task, "BatTask", 2048, NULL, 3, &local_battery_TaskHandle);
+    ESP_ERROR_CHECK(hoja_init());
+}
 
-    err = hoja_init();
+void app_main()
+{
+    init_gyro();
+    init_hoja();
 }
