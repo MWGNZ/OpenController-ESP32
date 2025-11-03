@@ -3,8 +3,6 @@
 #define I2C_MASTER_SCL_IO GPIO_NUM_19 /*!< GPIO number used for I2C master clock */
 #define I2C_MASTER_SDA_IO GPIO_NUM_18 /*!< GPIO number used for I2C master data  */
 
-#define I2C_INPUT_PIN_MASK ((1ULL << I2C_MASTER_SCL_IO) | (1ULL << I2C_MASTER_SDA_IO))
-
 uint8_t i2cData[14];
 #define RAD_TO_DEG 57.29578
 
@@ -53,9 +51,9 @@ float yaw, pitch, roll; // Euler angle output
 #define GPIO_BTN_X GPIO_NUM_26
 #define GPIO_BTN_Y GPIO_NUM_27
 
-#define GPIO_BTN_L GPIO_NUM_21
+#define GPIO_BTN_L  GPIO_NUM_21
 #define GPIO_BTN_ZL GPIO_NUM_3
-#define GPIO_BTN_R GPIO_NUM_22
+#define GPIO_BTN_R  GPIO_NUM_22
 #define GPIO_BTN_ZR GPIO_NUM_5
 #define GPIO_BTN_STICKL GPIO_NUM_16
 #define GPIO_BTN_STICKR GPIO_NUM_17
@@ -65,19 +63,21 @@ float yaw, pitch, roll; // Euler angle output
 #define GPIO_BTN_DL GPIO_NUM_14
 #define GPIO_BTN_DR GPIO_NUM_15
 
-#define GPIO_BTN_SYNC GPIO_NUM_4
-#define GPIO_BTN_START GPIO_NUM_5
-#define GPIO_BTN_SELECT GPIO_NUM_15
-#define GPIO_BTN_HOME GPIO_NUM_17
+#define GPIO_BTN_GYRO_ON GPIO_NUM_4
+#define GPIO_BTN_START   GPIO_NUM_34
+#define GPIO_BTN_SELECT  GPIO_NUM_35
+#define GPIO_BTN_HOME     GPIO_NUM_17
 
 #define ADC_STICK_LX ADC1_CHANNEL_4 /*!< ADC1 channel 4 is GPIO32 */
 #define ADC_STICK_LY ADC1_CHANNEL_5 /*!< ADC1 channel 5 is GPIO33 */
 // #define ADC_STICK_RX     ADC1_CHANNEL_6
 // #define ADC_STICK_RY     ADC1_CHANNEL_7
 
-#define GPIO_INPUT_PIN_MASK ((1ULL << GPIO_BTN_A) | (1ULL << GPIO_BTN_B) | (1ULL << GPIO_BTN_X) | (1ULL << GPIO_BTN_Y) | (1ULL << GPIO_BTN_L) | (1ULL << GPIO_BTN_ZL) | (1ULL << GPIO_BTN_R) | (1ULL << GPIO_BTN_ZR) | (1ULL << GPIO_BTN_STICKL) | (1ULL << GPIO_BTN_STICKR) | (1ULL << GPIO_BTN_DU) | (1ULL << GPIO_BTN_DD) | (1ULL << GPIO_BTN_DL) | (1ULL << GPIO_BTN_DR) | (1ULL << GPIO_BTN_SYNC) | (1ULL << GPIO_BTN_START) | (1ULL << GPIO_BTN_SELECT) | (1ULL << GPIO_BTN_HOME))
+#define GPIO_INPUT_PIN_MASK ((1ULL << GPIO_BTN_A) | (1ULL << GPIO_BTN_B) | (1ULL << GPIO_BTN_X) | (1ULL << GPIO_BTN_Y) | (1ULL << GPIO_BTN_L) | (1ULL << GPIO_BTN_ZL) | (1ULL << GPIO_BTN_R) | (1ULL << GPIO_BTN_ZR) | (1ULL << GPIO_BTN_STICKL) | (1ULL << GPIO_BTN_STICKR) | (1ULL << GPIO_BTN_DU) | (1ULL << GPIO_BTN_DD) | (1ULL << GPIO_BTN_DL) | (1ULL << GPIO_BTN_DR) | (1ULL << GPIO_BTN_GYRO_ON) | (1ULL << GPIO_BTN_START) | (1ULL << GPIO_BTN_SELECT) | (1ULL << GPIO_BTN_HOME))
 
 hoja_controller_mode_t CURENT_CONTROLLER_MODE;
+
+bool gyro_on;
 
 //--------------------------------------------------------------------------------------------------
 // Mahony scheme uses proportional and integral filtering on
@@ -194,6 +194,20 @@ static esp_err_t i2c_master_init(void)
     return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
 
+void reset_gyro()
+{
+    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x80); // reset config
+    vTaskDelay(1 * pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
+
+    i2cData[0] = 7;    // Set the sample rate to 1000Hz - 8kHz/(7+1) = 1000Hz
+    i2cData[1] = 0x00; // Disable FSYNC and set 260 Hz Acc filtering, 256 Hz Gyro filtering, 8 KHz sampling
+    i2cData[2] = 0x00; // Set Gyro Full Scale Range to ±250deg/s
+    i2cData[3] = 0x00; // Set Accelerometer Full Scale Range to ±2g
+
+    MPU6500_register_write_byte(0x19, *i2cData);               // set SMPLRT_DIV
+    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x01); // PLL with X axis gyroscope reference and disable sleep mode
+}
+
 // Set up function to update inputs
 void local_button_cb()
 {
@@ -220,10 +234,21 @@ void local_button_cb()
     hoja_button_data.dpad_left = !util_getbit(regread_low, GPIO_BTN_DL);
     hoja_button_data.dpad_right = !util_getbit(regread_low, GPIO_BTN_DR);
 
-    hoja_button_data.button_pair = !util_getbit(regread_low, GPIO_BTN_SYNC);
+    bool new_gyro = !util_getbit(regread_low, GPIO_BTN_GYRO_ON);
+    if (gyro_on != new_gyro)
+    {
+        last = esp_timer_get_time();
+        gyro_on = new_gyro;
+
+        if (gyro_on)
+        {
+            reset_gyro();
+        }
+    }
+
     hoja_button_data.button_start = !util_getbit(regread_low, GPIO_BTN_START);
     hoja_button_data.button_select = !util_getbit(regread_low, GPIO_BTN_SELECT);
-    hoja_button_data.button_home = !util_getbit(regread_low, GPIO_BTN_HOME);
+    // hoja_button_data.button_home = !util_getbit(regread_low, GPIO_BTN_HOME);
 }
 
 uint16_t fudge_reading(uint16_t raw_reading, bool invert)
@@ -234,7 +259,7 @@ uint16_t fudge_reading(uint16_t raw_reading, bool invert)
     }
 
     int midpoint = 2048;
-    int deadzone = 250;
+    int deadzone = 260;
     if (((midpoint - deadzone) < raw_reading) && (raw_reading < (midpoint + deadzone)))
     {
         return midpoint;
@@ -246,7 +271,23 @@ uint16_t fix_yaw(float yaaw)
 {
     float rotate = fmod((yaaw + 180), 360.0); // rotate so 180 is midpoint
 
-    return (uint16_t)(rotate);
+    return (uint16_t)rotate;
+}
+
+uint16_t fix_roll(float rollll)
+{
+    int midpoint = 2048;
+    int deadzone = 5;
+    if ((deadzone < rollll) && (rollll < deadzone))
+    {
+        return (uint16_t)midpoint;
+    }
+
+    float rotate = fmod((rollll + 180), 360.0); // rotate so 180 is midpoint
+    if (rotate < 5)
+        rotate = 5;
+
+    return (uint16_t)rotate;
 }
 
 void UpdateReadings()
@@ -322,14 +363,22 @@ void newshit()
 // scanned once between each polling interval. This varies from core to core.
 void local_analog_cb()
 {
-    UpdateReadings();
-    newshit();
+    if (gyro_on)
+    {
+        UpdateReadings();
+        newshit();
 
-    // read stick 1
-    hoja_analog_data.rs_x = -fix_yaw(yaw);
-    hoja_analog_data.rs_y = (roll - 180);
+        // read stick 1
+        hoja_analog_data.rs_x = -fix_yaw(yaw);
+        hoja_analog_data.rs_y = fix_roll(roll);
+    }
+    else
+    {
+        hoja_analog_data.rs_x = fix_yaw(180);
+        hoja_analog_data.rs_y = fix_roll(0);
+    }
 
-    hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), true );
+    hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), true);
     hoja_analog_data.ls_y = fudge_reading(adc1_get_raw(ADC_STICK_LY), CURENT_CONTROLLER_MODE != HOJA_CONTROLLER_MODE_NS);
 
     // if (hoja_button_data.trigger_zl == 1) {hoja_analog_data.lt_a = 255;}
@@ -365,7 +414,6 @@ void local_boot_evt(hoja_boot_event_t evt)
 
             CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_DINPUT;
             hoja_set_core(HOJA_CORE_BT_DINPUT);
-            // core_usb_set_subcore(USB_SUBCORE_DINPUT);
 
             err = hoja_start_core();
             if (err == HOJA_OK)
@@ -384,7 +432,6 @@ void local_boot_evt(hoja_boot_event_t evt)
 
             CURENT_CONTROLLER_MODE = HOJA_CONTROLLER_MODE_XINPUT;
             hoja_set_core(HOJA_CORE_BT_XINPUT);
-            // core_usb_set_subcore(USB_SUBCORE_XINPUT);
 
             err = hoja_start_core();
             if (err == HOJA_OK)
@@ -505,14 +552,6 @@ void local_system_evt(hoja_system_event_t evt, uint8_t param)
         ESP_LOGI(TAG, "hoja_set_force_wired");
         hoja_set_force_wired(false);
 
-        // ESP_LOGI(TAG, "loaded_settings.controller_mode = %i", loaded_settings.controller_mode);
-        // if (loaded_settings.controller_mode != CURENT_CONTROLLER_MODE)
-        // {
-        //     ESP_LOGI(TAG, "loaded_settings.controller_mode");
-        //     loaded_settings.controller_mode = CURENT_CONTROLLER_MODE;
-        //     hoja_settings_saveall();
-        // }
-
         // Check to see what buttons are being held. Adjust state accordingly.
         if (hoja_button_data.button_left)
         {
@@ -617,19 +656,7 @@ void init_gyro()
     /* Read the MPU6500 WHO_AM_I register, on power up the register should have the value 0x70 */
     ESP_ERROR_CHECK(MPU6500_register_read(MPU6500_WHO_AM_I_REG, i2cData, 1));
 
-    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x80); // reset config
-    vTaskDelay(1 * pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
-
-    i2cData[0] = 7;    // Set the sample rate to 1000Hz - 8kHz/(7+1) = 1000Hz
-    i2cData[1] = 0x00; // Disable FSYNC and set 260 Hz Acc filtering, 256 Hz Gyro filtering, 8 KHz sampling
-    i2cData[2] = 0x00; // Set Gyro Full Scale Range to ±250deg/s
-    i2cData[3] = 0x00; // Set Accelerometer Full Scale Range to ±2g
-
-    MPU6500_register_write_byte(0x19, *i2cData);               // set SMPLRT_DIV
-    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x01); // PLL with X axis gyroscope reference and disable sleep mode
-
-    vTaskDelay(200 / portTICK_PERIOD_MS);
-    UpdateReadings();
+    reset_gyro();
 }
 
 void init_hoja()
@@ -649,10 +676,14 @@ void init_hoja()
     hoja_register_event_callback(local_event_cb);
 
     ESP_ERROR_CHECK(hoja_init());
+
+    hoja_analog_data.rs_x = fix_yaw(180);
+    hoja_analog_data.rs_y = fix_roll(0);
 }
 
 void app_main()
 {
+    gyro_on = false;
     init_gyro();
     init_hoja();
 }
