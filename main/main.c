@@ -220,7 +220,7 @@ void UpdateReadings()
     gz = ((i2cData[12] << 8) | i2cData[13]);
 }
 
-void newshit()
+void do_math()
 {
     float Axyz[3];
     float Gxyz[3];
@@ -345,7 +345,7 @@ void local_analog_cb()
     if (gyro_is_on)
     {
         UpdateReadings();
-        newshit();
+        do_math();
 
         // read stick 1
         hoja_analog_data.rs_x = fix_yaw(yaw);
@@ -406,7 +406,7 @@ void local_button_cb()
         if (gyro_is_on)
         {
             UpdateReadings();
-            newshit();
+            do_math();
         }
         else
         {
@@ -721,5 +721,5 @@ void app_main()
         UpdateReadings();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    newshit();
+    do_math();
 }
