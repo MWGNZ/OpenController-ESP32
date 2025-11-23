@@ -14,9 +14,9 @@ int16_t gx, gy, gz;
 // a particular example of an MPU-6500. They are not correct for other examples.
 // The IMU code will NOT work well or at all if these are not correct
 
-float A_cal[6] = {-4808.0, -6314.0, 9598.0, 1.000, 1.000, 1.000}; // 0..2 offset xyz, 3..5 scale xyz
+float A_cal[6] = {5652.0, 5993.0, 8202.0, 1.000, 1.000, 1.000}; // 0..2 offset xyz, 3..5 scale xyz
 
-float G_off[3] = {234.0, -54.0, -40.0};            // raw offsets, determined for gyro at rest
+float G_off[3] = {108.0, 9.0, 91.0};               // raw offsets, determined for gyro at rest
 #define gscale ((250. / 32768.0) * (M_PI / 180.0)) // gyro default 250 LSB per d/s -> rad/s
 
 // ^^^^^^^^^^^^^^^^^^^ VERY IMPORTANT ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -47,37 +47,37 @@ float yaw, pitch, roll; // Euler angle output
 #define SAMPLE_PERIOD_MS 100
 
 #define GPIO_BTN_A GPIO_NUM_23
-#define GPIO_BTN_B GPIO_NUM_25
-#define GPIO_BTN_X GPIO_NUM_26
-#define GPIO_BTN_Y GPIO_NUM_27
+#define GPIO_BTN_B GPIO_NUM_22
+#define GPIO_BTN_X GPIO_NUM_17
+#define GPIO_BTN_Y GPIO_NUM_16
 
-#define GPIO_BTN_L  GPIO_NUM_21
-#define GPIO_BTN_ZL GPIO_NUM_3
-#define GPIO_BTN_R  GPIO_NUM_22
-#define GPIO_BTN_ZR GPIO_NUM_5
-#define GPIO_BTN_STICKL GPIO_NUM_16
-#define GPIO_BTN_STICKR GPIO_NUM_17
+#define GPIO_BTN_L  GPIO_NUM_14
+#define GPIO_BTN_L2 GPIO_NUM_3
+#define GPIO_BTN_R  GPIO_NUM_15
+#define GPIO_BTN_R2 GPIO_NUM_4
+#define GPIO_BTN_L3 GPIO_NUM_5
+#define GPIO_BTN_R3 GPIO_NUM_12
 
-#define GPIO_BTN_DU GPIO_NUM_12
+#define GPIO_BTN_DU GPIO_NUM_25
 #define GPIO_BTN_DD GPIO_NUM_13
-#define GPIO_BTN_DL GPIO_NUM_14
-#define GPIO_BTN_DR GPIO_NUM_15
+#define GPIO_BTN_DL GPIO_NUM_27
+#define GPIO_BTN_DR GPIO_NUM_26
 
-#define GPIO_BTN_GYRO_ON GPIO_NUM_4
-#define GPIO_BTN_START   GPIO_NUM_34
-#define GPIO_BTN_SELECT  GPIO_NUM_35
-#define GPIO_BTN_HOME     GPIO_NUM_17
+#define GPIO_BTN_GYRO_ON GPIO_NUM_34
+#define GPIO_BTN_START   GPIO_NUM_36
+#define GPIO_BTN_SELECT  GPIO_NUM_39
+#define GPIO_BTN_HOME    GPIO_NUM_35
 
 #define ADC_STICK_LX ADC1_CHANNEL_4 /*!< ADC1 channel 4 is GPIO32 */
 #define ADC_STICK_LY ADC1_CHANNEL_5 /*!< ADC1 channel 5 is GPIO33 */
 // #define ADC_STICK_RX     ADC1_CHANNEL_6
 // #define ADC_STICK_RY     ADC1_CHANNEL_7
 
-#define GPIO_INPUT_PIN_MASK ((1ULL << GPIO_BTN_A) | (1ULL << GPIO_BTN_B) | (1ULL << GPIO_BTN_X) | (1ULL << GPIO_BTN_Y) | (1ULL << GPIO_BTN_L) | (1ULL << GPIO_BTN_ZL) | (1ULL << GPIO_BTN_R) | (1ULL << GPIO_BTN_ZR) | (1ULL << GPIO_BTN_STICKL) | (1ULL << GPIO_BTN_STICKR) | (1ULL << GPIO_BTN_DU) | (1ULL << GPIO_BTN_DD) | (1ULL << GPIO_BTN_DL) | (1ULL << GPIO_BTN_DR) | (1ULL << GPIO_BTN_GYRO_ON) | (1ULL << GPIO_BTN_START) | (1ULL << GPIO_BTN_SELECT) | (1ULL << GPIO_BTN_HOME))
+#define GPIO_INPUT_PIN_MASK ((1ULL << GPIO_BTN_A) | (1ULL << GPIO_BTN_B) | (1ULL << GPIO_BTN_X) | (1ULL << GPIO_BTN_Y) | (1ULL << GPIO_BTN_L) | (1ULL << GPIO_BTN_L2) | (1ULL << GPIO_BTN_R) | (1ULL << GPIO_BTN_R2) | (1ULL << GPIO_BTN_L3) | (1ULL << GPIO_BTN_R3) | (1ULL << GPIO_BTN_DU) | (1ULL << GPIO_BTN_DD) | (1ULL << GPIO_BTN_DL) | (1ULL << GPIO_BTN_DR) | (1ULL << GPIO_BTN_GYRO_ON) | (1ULL << GPIO_BTN_START) | (1ULL << GPIO_BTN_SELECT) | (1ULL << GPIO_BTN_HOME))
 
 hoja_controller_mode_t CURENT_CONTROLLER_MODE;
 
-bool gyro_on;
+bool gyro_is_on;
 
 //--------------------------------------------------------------------------------------------------
 // Mahony scheme uses proportional and integral filtering on
@@ -208,88 +208,6 @@ void reset_gyro()
     MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x01); // PLL with X axis gyroscope reference and disable sleep mode
 }
 
-// Set up function to update inputs
-void local_button_cb()
-{
-    ets_delay_us(15);
-
-    // Read the GPIO registers and mask the data
-    uint32_t regread_low = REG_READ(GPIO_IN_REG);
-    uint32_t regread_high = REG_READ(GPIO_IN1_REG);
-
-    hoja_button_data.button_right = !util_getbit(regread_low, GPIO_BTN_A);
-    hoja_button_data.button_down = !util_getbit(regread_low, GPIO_BTN_B);
-    hoja_button_data.button_up = !util_getbit(regread_low, GPIO_BTN_X);
-    hoja_button_data.button_left = !util_getbit(regread_low, GPIO_BTN_Y);
-
-    hoja_button_data.trigger_l = !util_getbit(regread_low, GPIO_BTN_L);
-    hoja_button_data.trigger_zl = !util_getbit(regread_low, GPIO_BTN_ZL);
-    hoja_button_data.trigger_r = !util_getbit(regread_low, GPIO_BTN_R);
-    hoja_button_data.trigger_zr = !util_getbit(regread_low, GPIO_BTN_ZR);
-    hoja_button_data.button_stick_left = !util_getbit(regread_low, GPIO_BTN_STICKL);
-    hoja_button_data.button_stick_right = !util_getbit(regread_low, GPIO_BTN_STICKR);
-
-    hoja_button_data.dpad_up = !util_getbit(regread_low, GPIO_BTN_DU);
-    hoja_button_data.dpad_down = !util_getbit(regread_low, GPIO_BTN_DD);
-    hoja_button_data.dpad_left = !util_getbit(regread_low, GPIO_BTN_DL);
-    hoja_button_data.dpad_right = !util_getbit(regread_low, GPIO_BTN_DR);
-
-    bool new_gyro = !util_getbit(regread_low, GPIO_BTN_GYRO_ON);
-    if (gyro_on != new_gyro)
-    {
-        last = esp_timer_get_time();
-        gyro_on = new_gyro;
-
-        if (gyro_on)
-        {
-            reset_gyro();
-        }
-    }
-
-    hoja_button_data.button_start = !util_getbit(regread_low, GPIO_BTN_START);
-    hoja_button_data.button_select = !util_getbit(regread_low, GPIO_BTN_SELECT);
-    // hoja_button_data.button_home = !util_getbit(regread_low, GPIO_BTN_HOME);
-}
-
-uint16_t fudge_reading(uint16_t raw_reading, bool invert)
-{
-    if (invert)
-    {
-        raw_reading = 4095 - raw_reading;
-    }
-
-    int midpoint = 2048;
-    int deadzone = 260;
-    if (((midpoint - deadzone) < raw_reading) && (raw_reading < (midpoint + deadzone)))
-    {
-        return midpoint;
-    }
-    return raw_reading;
-}
-
-uint16_t fix_yaw(float yaaw)
-{
-    float rotate = fmod((yaaw + 180), 360.0); // rotate so 180 is midpoint
-
-    return (uint16_t)rotate;
-}
-
-uint16_t fix_roll(float rollll)
-{
-    int midpoint = 2048;
-    int deadzone = 5;
-    if ((deadzone < rollll) && (rollll < deadzone))
-    {
-        return (uint16_t)midpoint;
-    }
-
-    float rotate = fmod((rollll + 180), 360.0); // rotate so 180 is midpoint
-    if (rotate < 5)
-        rotate = 5;
-
-    return (uint16_t)rotate;
-}
-
 void UpdateReadings()
 {
     MPU6500_register_read(MPU6500_READING_DATA_REG, i2cData, 14);
@@ -358,37 +276,147 @@ void newshit()
     roll *= 180.0 / M_PI;
 }
 
+uint16_t fudge_reading(uint16_t raw_reading, bool invert)
+{
+    if (invert)
+    {
+        raw_reading = 4095 - raw_reading;
+    }
+
+    int midpoint = 2048;
+    int deadzone = 260;
+    if (((midpoint - deadzone) < raw_reading) && (raw_reading < (midpoint + deadzone)))
+    {
+        return midpoint;
+    }
+    return raw_reading;
+}
+
+uint16_t fix_yaw(float yaaw)
+{
+    int deadzone = 5;
+    if ((-deadzone < yaaw) && (yaaw < deadzone))
+    {
+        yaaw = 0;
+    }
+
+    // if (yaaw > 89)
+    // {
+    //     yaaw = 89;
+    // }
+    // if (yaaw < -89)
+    // {
+    //     yaaw = -89;
+    // }
+
+    float rotate = fmod((yaaw + 180), 360.0); // rotate so 180 is midpoint
+    // float rotate = yaaw;
+
+    return 10 * (uint16_t)rotate;
+}
+
+uint16_t fix_roll(float rollll)
+{
+    int deadzone = 5;
+    if ((-deadzone < rollll) && (rollll < deadzone))
+    {
+        rollll = 0;
+    }
+
+    if (rollll > 89)
+    {
+        rollll = 89;
+    }
+    if (rollll < -89)
+    {
+        rollll = -89;
+    }
+
+    float rotate = fmod((rollll + 180), 360.0); // rotate so 180 is midpoint
+
+    return 10 * (uint16_t)rotate;
+}
+
 // Separate task to read sticks.
 // This is essential to have as a separate component as ADC scans typically take more time and this is only
 // scanned once between each polling interval. This varies from core to core.
 void local_analog_cb()
 {
-    if (gyro_on)
+    if (gyro_is_on)
     {
         UpdateReadings();
         newshit();
 
         // read stick 1
-        hoja_analog_data.rs_x = -fix_yaw(yaw);
+        hoja_analog_data.rs_x = fix_yaw(yaw);
         hoja_analog_data.rs_y = fix_roll(roll);
     }
     else
     {
-        hoja_analog_data.rs_x = fix_yaw(180);
+        hoja_analog_data.rs_x = fix_yaw(0);
         hoja_analog_data.rs_y = fix_roll(0);
     }
 
-    hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), true);
-    hoja_analog_data.ls_y = fudge_reading(adc1_get_raw(ADC_STICK_LY), CURENT_CONTROLLER_MODE != HOJA_CONTROLLER_MODE_NS);
+    if (CURENT_CONTROLLER_MODE == HOJA_CONTROLLER_MODE_NS)
+    {
+        hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), true);
+        hoja_analog_data.ls_y = fudge_reading(adc1_get_raw(ADC_STICK_LY), false);
+    }
+    else if (CURENT_CONTROLLER_MODE == HOJA_CONTROLLER_MODE_XINPUT)
+    {
+        hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), false);
+        hoja_analog_data.ls_y = fudge_reading(adc1_get_raw(ADC_STICK_LY), true);
+    }
+}
 
-    // if (hoja_button_data.trigger_zl == 1) {hoja_analog_data.lt_a = 255;}
-    // hoja_analog_data.lt_a = (hoja_button_data.trigger_zl) ? 255 : 0;
+// Set up function to update inputs
+void local_button_cb()
+{
+    ets_delay_us(15);
 
-    // Set analog triggers
-    // hoja_analog_data.lt_a = (hoja_processed_buttons.trigger_zl) ? DPAD_ANALOG_POS : 0;
-    // hoja_analog_data.rt_a = (hoja_processed_buttons.trigger_zr) ? DPAD_ANALOG_POS : 0;
-    // hoja_analog_data.lt_a = 2048;
-    // hoja_analog_data.rt_a = 2048;
+    // Read the GPIO registers and mask the data
+    uint32_t regread_low = REG_READ(GPIO_IN_REG) & GPIO_INPUT_PIN_MASK;
+    uint32_t regread_high = REG_READ(GPIO_IN1_REG);
+
+    hoja_button_data.button_right = !util_getbit(regread_low, GPIO_BTN_A);
+    hoja_button_data.button_down = !util_getbit(regread_low, GPIO_BTN_B);
+    hoja_button_data.button_up = !util_getbit(regread_low, GPIO_BTN_X);
+    hoja_button_data.button_left = !util_getbit(regread_low, GPIO_BTN_Y);
+
+    hoja_button_data.trigger_l  = !util_getbit(regread_low, GPIO_BTN_L);
+    hoja_button_data.trigger_zl = !util_getbit(regread_low, GPIO_BTN_L2);
+    hoja_button_data.trigger_r  = !util_getbit(regread_low, GPIO_BTN_R);
+    hoja_button_data.trigger_zr = !util_getbit(regread_low, GPIO_BTN_R2);
+    hoja_button_data.button_stick_left  = !util_getbit(regread_low, GPIO_BTN_L3);
+    hoja_button_data.button_stick_right = !util_getbit(regread_low, GPIO_BTN_R3);
+    hoja_analog_data.lt_a = (hoja_button_data.trigger_zl) ? DPAD_ANALOG_POS : 0;
+    hoja_analog_data.rt_a = (hoja_button_data.trigger_zr) ? DPAD_ANALOG_POS : 0;
+
+    hoja_button_data.dpad_up = !util_getbit(regread_low, GPIO_BTN_DU);
+    hoja_button_data.dpad_down = !util_getbit(regread_low, GPIO_BTN_DD);
+    hoja_button_data.dpad_left = !util_getbit(regread_low, GPIO_BTN_DL);
+    hoja_button_data.dpad_right = !util_getbit(regread_low, GPIO_BTN_DR);
+
+    bool new_gyro = !util_getbit(regread_high, GPIO_BTN_GYRO_ON);
+    if (new_gyro != gyro_is_on)
+    {
+        last = esp_timer_get_time();
+        gyro_is_on = new_gyro;
+
+        if (gyro_is_on)
+        {
+            UpdateReadings();
+            newshit();
+        }
+        else
+        {
+            hoja_analog_data.rs_y = fix_roll(0);
+        }
+    }
+
+    hoja_button_data.button_start = !util_getbit(regread_high, GPIO_BTN_START);
+    hoja_button_data.button_select = !util_getbit(regread_high, GPIO_BTN_SELECT);
+    hoja_button_data.button_home = !util_getbit(regread_high, GPIO_BTN_HOME);
 }
 
 void local_boot_evt(hoja_boot_event_t evt)
@@ -669,6 +697,7 @@ void init_hoja()
     io_conf.pin_bit_mask = GPIO_INPUT_PIN_MASK;
     io_conf.mode = GPIO_MODE_INPUT;
     io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&io_conf);
 
     hoja_register_button_callback(local_button_cb);
@@ -677,13 +706,20 @@ void init_hoja()
 
     ESP_ERROR_CHECK(hoja_init());
 
-    hoja_analog_data.rs_x = fix_yaw(180);
+    hoja_analog_data.rs_x = fix_yaw(0);
     hoja_analog_data.rs_y = fix_roll(0);
 }
 
 void app_main()
 {
-    gyro_on = false;
+    gyro_is_on = false;
     init_gyro();
     init_hoja();
+
+    for (int i = 0; 1 < 100; i++)
+    {
+        UpdateReadings();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    newshit();
 }
