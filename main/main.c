@@ -75,6 +75,8 @@ float yaw, pitch, roll; // Euler angle output
 
 #define GPIO_INPUT_PIN_MASK ((1ULL << GPIO_BTN_A) | (1ULL << GPIO_BTN_B) | (1ULL << GPIO_BTN_X) | (1ULL << GPIO_BTN_Y) | (1ULL << GPIO_BTN_L) | (1ULL << GPIO_BTN_L2) | (1ULL << GPIO_BTN_R) | (1ULL << GPIO_BTN_R2) | (1ULL << GPIO_BTN_L3) | (1ULL << GPIO_BTN_R3) | (1ULL << GPIO_BTN_DU) | (1ULL << GPIO_BTN_DD) | (1ULL << GPIO_BTN_DL) | (1ULL << GPIO_BTN_DR) | (1ULL << GPIO_BTN_GYRO_ON) | (1ULL << GPIO_BTN_START) | (1ULL << GPIO_BTN_SELECT) | (1ULL << GPIO_BTN_HOME))
 
+int DPAD_ANALOG_POS = 1023;
+
 hoja_controller_mode_t CURENT_CONTROLLER_MODE;
 
 bool gyro_is_on;
@@ -414,9 +416,9 @@ void local_button_cb()
         }
     }
 
-    hoja_button_data.button_start = !util_getbit(regread_high, GPIO_BTN_START);
+    hoja_button_data.button_start  = !util_getbit(regread_high, GPIO_BTN_START);
     hoja_button_data.button_select = !util_getbit(regread_high, GPIO_BTN_SELECT);
-    hoja_button_data.button_home = !util_getbit(regread_high, GPIO_BTN_HOME);
+    hoja_button_data.button_home   = !util_getbit(regread_high, GPIO_BTN_HOME);
 }
 
 void local_boot_evt(hoja_boot_event_t evt)
