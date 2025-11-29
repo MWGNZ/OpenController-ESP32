@@ -1,0 +1,49 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build",
+			"type": "shell",
+			"command": "sudo docker run -it  -v /home/matt/Code/OpenController-ESP32:/project -w /project docker.io/espressif/idf:release-v5.0 idf.py build",
+			"group": "build",
+			"presentation": {
+				"echo": true,
+				"reveal": "always",
+				"focus": true,
+				"panel": "shared",
+				"showReuseMessage": true,
+				"clear": true
+			}
+		},
+		{
+			"label": "Flash",
+			"type": "shell",
+			"command": "sudo docker run -it  -v /home/matt/Code/OpenController-ESP32:/project -w /project --device=/dev/ttyUSB0 docker.io/espressif/idf:release-v5.0 idf.py -p /dev/ttyUSB0 flash",
+			"group": "build",
+			"presentation": {
+				"echo": true,
+				"reveal": "always",
+				"focus": true,
+				"panel": "shared",
+				"showReuseMessage": true,
+				"clear": true
+			},
+			"runOptions": {"instancePolicy": "terminateOldest"}
+		},
+		{
+			"label": "Monitor",
+			"type": "shell",
+			"command": "sudo docker run -it  -v /home/matt/Code/OpenController-ESP32:/project -w /project --device=/dev/ttyUSB0 docker.io/espressif/idf:release-v5.0 idf.py -p /dev/ttyUSB0 monitor",
+			"group": "build",
+			"presentation": {
+				"echo": true,
+				"reveal": "always",
+				"focus": true,
+				"panel": "shared",
+				"showReuseMessage": true,
+				"clear": true
+			},
+			"runOptions": {"instancePolicy": "terminateOldest"}
+		}
+	]
+}
