@@ -33,10 +33,8 @@ float q[4] = {1.0, 0.0, 0.0, 0.0};
 float Kp = 20.0;
 float Ki = 0.0;
 
-// globals for AHRS loop timing
-unsigned long now_ms, last_ms = 0; // millis() timers
-
 float yaw, pitch, roll; // Euler angle output
+float hold_yaw, hold_roll;
 
 #define MPU6500_SENSOR_ADDR 0x68 /*!< Slave address of the MPU6500 sensor */
 #define MPU6500_PWR_MGMT_1_REG 0x6B
@@ -294,49 +292,41 @@ uint16_t fudge_reading(uint16_t raw_reading, bool invert)
     return raw_reading;
 }
 
+// yaw is x axis
 uint16_t fix_yaw(float yaaw)
 {
     int deadzone = 5;
     if ((-deadzone < yaaw) && (yaaw < deadzone))
     {
-        yaaw = 0;
+        return 1950;
     }
 
-    // if (yaaw > 89)
-    // {
-    //     yaaw = 89;
-    // }
-    // if (yaaw < -89)
-    // {
-    //     yaaw = -89;
-    // }
-
     float rotate = fmod((yaaw + 180), 360.0); // rotate so 180 is midpoint
-    // float rotate = yaaw;
 
-    return 10 * (uint16_t)rotate;
+    return 15 * (rotate - 180) + 1950;
 }
 
+// roll is y axis
 uint16_t fix_roll(float rollll)
 {
     int deadzone = 5;
     if ((-deadzone < rollll) && (rollll < deadzone))
     {
-        rollll = 0;
+        return 1950;
     }
 
-    if (rollll > 89)
+    if (rollll > 120)
     {
-        rollll = 89;
+        rollll = 120;
     }
-    if (rollll < -89)
+    if (rollll < -120)
     {
-        rollll = -89;
+        rollll = -120;
     }
 
-    float rotate = fmod((rollll + 180), 360.0); // rotate so 180 is midpoint
+    float rotate = fmod((rollll + 180), 360.0);
 
-    return 10 * (uint16_t)rotate;
+    return 15 * (rotate - 180) + 1950;
 }
 
 // Separate task to read sticks.
@@ -349,9 +339,8 @@ void local_analog_cb()
         UpdateReadings();
         do_math();
 
-        // read stick 1
-        hoja_analog_data.rs_x = fix_yaw(yaw);
-        hoja_analog_data.rs_y = fix_roll(roll);
+        hoja_analog_data.rs_x = fix_yaw(yaw - hold_yaw);
+        hoja_analog_data.rs_y = fix_roll(roll - hold_roll);
     }
     else
     {
@@ -361,7 +350,7 @@ void local_analog_cb()
 
     if (CURENT_CONTROLLER_MODE == HOJA_CONTROLLER_MODE_NS)
     {
-        hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), true);
+        hoja_analog_data.ls_x = fudge_reading(adc1_get_raw(ADC_STICK_LX), false);
         hoja_analog_data.ls_y = fudge_reading(adc1_get_raw(ADC_STICK_LY), false);
     }
     else if (CURENT_CONTROLLER_MODE == HOJA_CONTROLLER_MODE_XINPUT)
@@ -400,7 +389,7 @@ void local_button_cb()
     hoja_button_data.dpad_right = !util_getbit(regread_low, GPIO_BTN_DR);
 
     bool new_gyro = !util_getbit(regread_high, GPIO_BTN_GYRO_ON);
-    if (new_gyro != gyro_is_on)
+    if (new_gyro != gyro_is_on) // has gyro enable state changed
     {
         last = esp_timer_get_time();
         gyro_is_on = new_gyro;
@@ -409,9 +398,12 @@ void local_button_cb()
         {
             UpdateReadings();
             do_math();
+            hold_yaw = yaw;
+            hold_roll = roll;
         }
         else
         {
+            hoja_analog_data.rs_x = fix_yaw(0);
             hoja_analog_data.rs_y = fix_roll(0);
         }
     }
@@ -715,6 +707,8 @@ void init_hoja()
 void app_main()
 {
     gyro_is_on = false;
+    hold_yaw = 0;
+    hold_roll = 0;
     init_gyro();
     init_hoja();
 
@@ -724,4 +718,6 @@ void app_main()
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     do_math();
+    local_analog_cb();
+    local_button_cb();
 }
