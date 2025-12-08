@@ -4,7 +4,21 @@
 		{
 			"label": "Build",
 			"type": "shell",
-			"command": "sudo docker run -it  -v /home/matt/Code/OpenController-ESP32:/project -w /project docker.io/espressif/idf:release-v5.0 idf.py build",
+			"command": "sudo docker run -it -v /home/matt/Code/OpenController-ESP32:/project -w /project docker.io/espressif/idf:release-v5.0 idf.py build",
+			"group": "build",
+			"presentation": {
+				"echo": true,
+				"reveal": "always",
+				"focus": true,
+				"panel": "shared",
+				"showReuseMessage": true,
+				"clear": true
+			}
+		},
+				{
+			"label": "Terminal",
+			"type": "shell",
+			"command": "sudo docker run -it -v /home/matt/Code/OpenController-ESP32:/project -w /project  --device=/dev/ttyUSB0 docker.io/espressif/idf:release-v5.0",
 			"group": "build",
 			"presentation": {
 				"echo": true,
