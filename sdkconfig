@@ -315,6 +315,12 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# ICM-20948 Settings
+#
+CONFIG_ICM_20948_USE_DMP=y
+# end of ICM-20948 Settings
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEFAULT is not set
@@ -688,7 +694,7 @@ CONFIG_BT_ALARM_MAX_NUM=50
 # Legacy ADC Configuration
 #
 # CONFIG_ADC_DISABLE_DAC is not set
-# CONFIG_ADC_SUPPRESS_DEPRECATE_WARN is not set
+CONFIG_ADC_SUPPRESS_DEPRECATE_WARN=y
 
 #
 # Legacy ADC Calibration Configuration
@@ -764,7 +770,7 @@ CONFIG_TWAI_ERRATA_FIX_LISTEN_ONLY_DOM=y
 #
 # CONFIG_RMT_ISR_IRAM_SAFE is not set
 # CONFIG_RMT_RECV_FUNC_IN_IRAM is not set
-# CONFIG_RMT_SUPPRESS_DEPRECATE_WARN is not set
+CONFIG_RMT_SUPPRESS_DEPRECATE_WARN=y
 # CONFIG_RMT_ENABLE_DEBUG_LOG is not set
 # end of RMT Configuration
 

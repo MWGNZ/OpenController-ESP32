@@ -1,3 +1,6 @@
 [submodule "components/HOJA-LIB-ESP32"]
 	path = components/HOJA-LIB-ESP32
 	url = https://github.com/MWGNZ/HOJA-LIB-ESP32
+[submodule "components/icm20948"]
+	path = components/icm20948
+	url = https://github.com/MWGNZ/icm20948

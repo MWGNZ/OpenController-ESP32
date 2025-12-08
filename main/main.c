@@ -2,56 +2,35 @@
 
 #define I2C_MASTER_SCL_IO GPIO_NUM_19 /*!< GPIO number used for I2C master clock */
 #define I2C_MASTER_SDA_IO GPIO_NUM_18 /*!< GPIO number used for I2C master data  */
+icm20948_device_t icm;
 
-uint8_t i2cData[14];
-#define RAD_TO_DEG 57.29578
+i2c_config_t conf = {
+    .mode = I2C_MODE_MASTER,
+    .sda_io_num = I2C_MASTER_SDA_IO,
+    .scl_io_num = I2C_MASTER_SCL_IO,
+    .sda_pullup_en = GPIO_PULLUP_ENABLE,
+    .scl_pullup_en = GPIO_PULLUP_ENABLE,
+    .master.clk_speed = 400000,
+    .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL};
 
-int16_t ax, ay, az;
-int16_t gx, gy, gz;
+icm0948_config_i2c_t icm_config = {
+    .i2c_port = I2C_NUM_0,
+    .i2c_addr = ICM_20948_I2C_ADDR_AD0};
 
-// vvvvvvvvvvvvvvvvvv  VERY VERY IMPORTANT vvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-// These are the previously determined offsets and scale factors for accelerometer and gyro for
-// a particular example of an MPU-6500. They are not correct for other examples.
-// The IMU code will NOT work well or at all if these are not correct
-
-float A_cal[6] = {5652.0, 5993.0, 8202.0, 1.000, 1.000, 1.000}; // 0..2 offset xyz, 3..5 scale xyz
-
-float G_off[3] = {108.0, 9.0, 91.0};               // raw offsets, determined for gyro at rest
-#define gscale ((250. / 32768.0) * (M_PI / 180.0)) // gyro default 250 LSB per d/s -> rad/s
-
-// ^^^^^^^^^^^^^^^^^^^ VERY IMPORTANT ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-static float deltat = 0;                // loop time in seconds
-static unsigned long now = 0, last = 0; // micros() timers
-
-// GLOBALLY DECLARED, required for Mahony filter
 // vector to hold quaternion
 float q[4] = {1.0, 0.0, 0.0, 0.0};
 
-// Free parameters in the Mahony filter and fusion scheme,
-// Kp for proportional feedback, Ki for integral
-float Kp = 20.0;
-float Ki = 0.0;
-
 float yaw, pitch, roll; // Euler angle output
 float hold_yaw, hold_roll;
-
-#define MPU6500_SENSOR_ADDR 0x68 /*!< Slave address of the MPU6500 sensor */
-#define MPU6500_PWR_MGMT_1_REG 0x6B
-#define MPU6500_WHO_AM_I_REG 0x75
-#define MPU6500_READING_DATA_REG 0x3B
-#define MPU6500_USER_CTL_REG 0x6A
-
-#define SAMPLE_PERIOD_MS 100
 
 #define GPIO_BTN_A GPIO_NUM_23
 #define GPIO_BTN_B GPIO_NUM_22
 #define GPIO_BTN_X GPIO_NUM_17
 #define GPIO_BTN_Y GPIO_NUM_16
 
-#define GPIO_BTN_L  GPIO_NUM_14
+#define GPIO_BTN_L GPIO_NUM_14
 #define GPIO_BTN_L2 GPIO_NUM_3
-#define GPIO_BTN_R  GPIO_NUM_15
+#define GPIO_BTN_R GPIO_NUM_15
 #define GPIO_BTN_R2 GPIO_NUM_4
 #define GPIO_BTN_L3 GPIO_NUM_5
 #define GPIO_BTN_R3 GPIO_NUM_12
@@ -62,9 +41,9 @@ float hold_yaw, hold_roll;
 #define GPIO_BTN_DR GPIO_NUM_26
 
 #define GPIO_BTN_GYRO_ON GPIO_NUM_34
-#define GPIO_BTN_START   GPIO_NUM_36
-#define GPIO_BTN_SELECT  GPIO_NUM_39
-#define GPIO_BTN_HOME    GPIO_NUM_35
+#define GPIO_BTN_START GPIO_NUM_36
+#define GPIO_BTN_SELECT GPIO_NUM_39
+#define GPIO_BTN_HOME GPIO_NUM_35
 
 #define ADC_STICK_LX ADC1_CHANNEL_4 /*!< ADC1 channel 4 is GPIO32 */
 #define ADC_STICK_LY ADC1_CHANNEL_5 /*!< ADC1 channel 5 is GPIO33 */
@@ -78,200 +57,111 @@ int DPAD_ANALOG_POS = 1023;
 hoja_controller_mode_t CURENT_CONTROLLER_MODE;
 
 bool gyro_is_on;
+bool last_dup = false;
+bool last_ddown = false;
+bool last_dleft = false;
+bool last_dright = false;
 
-//--------------------------------------------------------------------------------------------------
-// Mahony scheme uses proportional and integral filtering on
-// the error between estimated reference vector (gravity) and measured one.
-// Madgwick's implementation of Mayhony's AHRS algorithm.
-// See: http://www.x-io.co.uk/node/8#open_source_ahrs_and_imu_algorithms
-//
-// Date      Author      Notes
-// 29/09/2011 SOH Madgwick    Initial release
-// 02/10/2011 SOH Madgwick  Optimised for reduced CPU load
-// last update 07/09/2020 SJR minor edits
-//--------------------------------------------------------------------------------------------------
-// IMU algorithm update
-
-void Mahony_update(float ax, float ay, float az, float gx, float gy, float gz, float deltat)
+void init_dmp(icm20948_device_t *icm)
 {
-    float recipNorm;
-    float vx, vy, vz;
-    float ex, ey, ez; // error terms
-    float qa, qb, qc;
-    static float ix = 0.0, iy = 0.0, iz = 0.0; // integral feedback terms
-    float tmp;
+    const char *TAG = "init_dmp";
+    bool success = true; // Use success to show if the DMP configuration was successful
 
-    // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-    tmp = ax * ax + ay * ay + az * az;
-    if (tmp > 0.0)
+    // Initialize the DMP with defaults.
+    success &= (icm20948_init_dmp_sensor_with_defaults(icm) == ICM_20948_STAT_OK);
+    // DMP sensor options are defined in ICM_20948_DMP.h
+    //    INV_ICM20948_SENSOR_ACCELEROMETER               (16-bit accel)
+    //    INV_ICM20948_SENSOR_GYROSCOPE                   (16-bit gyro + 32-bit calibrated gyro)
+    //    INV_ICM20948_SENSOR_RAW_ACCELEROMETER           (16-bit accel)
+    //    INV_ICM20948_SENSOR_RAW_GYROSCOPE               (16-bit gyro + 32-bit calibrated gyro)
+    //    INV_ICM20948_SENSOR_MAGNETIC_FIELD_UNCALIBRATED (16-bit compass)
+    //    INV_ICM20948_SENSOR_GYROSCOPE_UNCALIBRATED      (16-bit gyro)
+    //    INV_ICM20948_SENSOR_STEP_DETECTOR               (Pedometer Step Detector)
+    //    INV_ICM20948_SENSOR_STEP_COUNTER                (Pedometer Step Detector)
+    //    INV_ICM20948_SENSOR_GAME_ROTATION_VECTOR        (32-bit 6-axis quaternion)
+    //    INV_ICM20948_SENSOR_ROTATION_VECTOR             (32-bit 9-axis quaternion + heading accuracy)
+    //    INV_ICM20948_SENSOR_GEOMAGNETIC_ROTATION_VECTOR (32-bit Geomag RV + heading accuracy)
+    //    INV_ICM20948_SENSOR_GEOMAGNETIC_FIELD           (32-bit calibrated compass)
+    //    INV_ICM20948_SENSOR_GRAVITY                     (32-bit 6-axis quaternion)
+    //    INV_ICM20948_SENSOR_LINEAR_ACCELERATION         (16-bit accel + 32-bit 6-axis quaternion)
+    //    INV_ICM20948_SENSOR_ORIENTATION                 (32-bit 9-axis quaternion + heading accuracy)
+
+    // Enable the DMP orientation sensor
+    success &= (inv_icm20948_enable_dmp_sensor(icm, INV_ICM20948_SENSOR_ORIENTATION, 1) == ICM_20948_STAT_OK);
+
+    // Enable any additional sensors / features
+    // success &= (myICM.enableDMPSensor(INV_ICM20948_SENSOR_RAW_GYROSCOPE) == ICM_20948_STAT_OK);
+    // success &= (myICM.enableDMPSensor(INV_ICM20948_SENSOR_RAW_ACCELEROMETER) == ICM_20948_STAT_OK);
+    // success &= (myICM.enableDMPSensor(INV_ICM20948_SENSOR_MAGNETIC_FIELD_UNCALIBRATED) == ICM_20948_STAT_OK);
+
+    // Configuring DMP to output data at multiple ODRs:
+    // DMP is capable of outputting multiple sensor data at different rates to FIFO.
+    // Setting value can be calculated as follows:
+    // Value = (DMP running rate / ODR ) - 1
+    // E.g. For a 5Hz ODR rate when DMP is running at 55Hz, value = (55/5) - 1 = 10.
+    success &= (inv_icm20948_set_dmp_sensor_period(icm, DMP_ODR_Reg_Quat9, 0) == ICM_20948_STAT_OK); // Set to the maximum
+    // success &= (myICM.setDMPODRrate(DMP_ODR_Reg_Accel, 0) == ICM_20948_STAT_OK); // Set to the maximum
+    // success &= (myICM.setDMPODRrate(DMP_ODR_Reg_Gyro, 0) == ICM_20948_STAT_OK); // Set to the maximum
+    // success &= (myICM.setDMPODRrate(DMP_ODR_Reg_Gyro_Calibr, 0) == ICM_20948_STAT_OK); // Set to the maximum
+    // success &= (myICM.setDMPODRrate(DMP_ODR_Reg_Cpass, 0) == ICM_20948_STAT_OK); // Set to the maximum
+    // success &= (myICM.setDMPODRrate(DMP_ODR_Reg_Cpass_Calibr, 0) == ICM_20948_STAT_OK); // Set to the maximum
+    //  Enable the FIFO
+    success &= (icm20948_enable_fifo(icm, true) == ICM_20948_STAT_OK);
+    // Enable the DMP
+    success &= (icm20948_enable_dmp(icm, 1) == ICM_20948_STAT_OK);
+    // Reset DMP
+    success &= (icm20948_reset_dmp(icm) == ICM_20948_STAT_OK);
+    // Reset FIFO
+    success &= (icm20948_reset_fifo(icm) == ICM_20948_STAT_OK);
+
+    // Check success
+    if (success)
     {
-
-        // Normalise accelerometer (assumed to measure the direction of gravity in body frame)
-        recipNorm = 1.0 / sqrt(tmp);
-        ax *= recipNorm;
-        ay *= recipNorm;
-        az *= recipNorm;
-
-        // Estimated direction of gravity in the body frame (factor of two divided out)
-        vx = q[1] * q[3] - q[0] * q[2]; // to normalize these terms, multiply each by 2.0
-        vy = q[0] * q[1] + q[2] * q[3];
-        vz = q[0] * q[0] - 0.5f + q[3] * q[3];
-
-        // Error is cross product between estimated and measured direction of gravity in body frame
-        // (half the actual magnitude)
-        ex = (ay * vz - az * vy);
-        ey = (az * vx - ax * vz);
-        ez = (ax * vy - ay * vx);
-
-        // Compute and apply to gyro term the integral feedback, if enabled
-        if (Ki > 0.0f)
-        {
-            ix += Ki * ex * deltat; // integral error scaled by Ki
-            iy += Ki * ey * deltat;
-            iz += Ki * ez * deltat;
-            gx += ix; // apply integral feedback
-            gy += iy;
-            gz += iz;
-        }
-
-        // Apply proportional feedback to gyro term
-        gx += Kp * ex;
-        gy += Kp * ey;
-        gz += Kp * ez;
+        ESP_LOGI(TAG, "DMP enabled!");
     }
-
-    // Integrate rate of change of quaternion, q cross gyro term
-    deltat = 0.5 * deltat;
-    gx *= deltat; // pre-multiply common factors
-    gy *= deltat;
-    gz *= deltat;
-    qa = q[0];
-    qb = q[1];
-    qc = q[2];
-    q[0] += (-qb * gx - qc * gy - q[3] * gz);
-    q[1] += (qa * gx + qc * gz - q[3] * gy);
-    q[2] += (qa * gy - qb * gz + q[3] * gx);
-    q[3] += (qa * gz + qb * gy - qc * gx);
-
-    // renormalise quaternion
-    recipNorm = 1.0 / sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-    q[0] = q[0] * recipNorm;
-    q[1] = q[1] * recipNorm;
-    q[2] = q[2] * recipNorm;
-    q[3] = q[3] * recipNorm;
-}
-
-static esp_err_t MPU6500_register_read(uint8_t reg_addr, uint8_t *data, size_t len)
-{
-    return i2c_master_write_read_device(I2C_MASTER_NUM, MPU6500_SENSOR_ADDR, &reg_addr, 1, data, len, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
-}
-
-static esp_err_t MPU6500_register_write_byte(uint8_t reg_addr, uint8_t data)
-{
-    int ret;
-    uint8_t write_buf[2] = {reg_addr, data};
-
-    ret = i2c_master_write_to_device(I2C_MASTER_NUM, MPU6500_SENSOR_ADDR, write_buf, sizeof(write_buf), I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
-
-    return ret;
-}
-
-static esp_err_t i2c_master_init(void)
-{
-    int i2c_master_port = I2C_MASTER_NUM;
-
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-    };
-
-    i2c_param_config(i2c_master_port, &conf);
-
-    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
-}
-
-void reset_gyro()
-{
-    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x80); // reset config
-    vTaskDelay(1 * pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
-
-    i2cData[0] = 7;    // Set the sample rate to 1000Hz - 8kHz/(7+1) = 1000Hz
-    i2cData[1] = 0x00; // Disable FSYNC and set 260 Hz Acc filtering, 256 Hz Gyro filtering, 8 KHz sampling
-    i2cData[2] = 0x00; // Set Gyro Full Scale Range to ±250deg/s
-    i2cData[3] = 0x00; // Set Accelerometer Full Scale Range to ±2g
-
-    MPU6500_register_write_byte(0x19, *i2cData);               // set SMPLRT_DIV
-    MPU6500_register_write_byte(MPU6500_PWR_MGMT_1_REG, 0x01); // PLL with X axis gyroscope reference and disable sleep mode
+    else
+    {
+        ESP_LOGE(TAG, "Enable DMP failed!");
+        while (1)
+            ; // Do nothing more
+    }
 }
 
 void UpdateReadings()
 {
-    MPU6500_register_read(MPU6500_READING_DATA_REG, i2cData, 14);
-
-    ax = ((i2cData[0] << 8) | i2cData[1]);
-    ay = ((i2cData[2] << 8) | i2cData[3]);
-    az = ((i2cData[4] << 8) | i2cData[5]);
-    gx = ((i2cData[8] << 8) | i2cData[9]);
-    gy = ((i2cData[10] << 8) | i2cData[11]);
-    gz = ((i2cData[12] << 8) | i2cData[13]);
+    while (1)
+    {
+        icm_20948_DMP_data_t data;
+        icm20948_status_e status = inv_icm20948_read_dmp_data(&icm, &data);
+        /* Was valid data available? */
+        if ((status == ICM_20948_STAT_OK) || (status == ICM_20948_STAT_FIFO_MORE_DATA_AVAIL))
+        {
+            /* We have asked for orientation data so we should receive Quat9 */
+            if ((data.header & DMP_header_bitmap_Quat9) > 0)
+            {
+                // Q0 value is computed from this equation: Q0^2 + Q1^2 + Q2^2 + Q3^2 = 1.
+                // In case of drift, the sum will not add to 1, therefore, quaternion data need to be corrected with right bias values.
+                // The quaternion data is scaled by 2^30.
+                // Scale to +/- 1
+                q[1] = ((double)data.Quat9.Data.Q1) / 1073741824.0; // Convert to double. Divide by 2^30
+                q[2] = ((double)data.Quat9.Data.Q2) / 1073741824.0; // Convert to double. Divide by 2^30
+                q[3] = ((double)data.Quat9.Data.Q3) / 1073741824.0; // Convert to double. Divide by 2^30
+                q[0] = sqrt(1.0 - ((q[1] * q[1]) + (q[2] * q[2]) + (q[3] * q[3])));
+            }
+        }
+    }
 }
 
 void do_math()
 {
-    float Axyz[3];
-    float Gxyz[3];
-
-    Axyz[0] = (float)ax;
-    Axyz[1] = (float)ay;
-    Axyz[2] = (float)az;
-
-    // apply offsets and scale factors from Magneto
-    for (int i = 0; i < 3; i++)
-        Axyz[i] = (Axyz[i] - A_cal[i]) * A_cal[i + 3];
-
-    Gxyz[0] = ((float)gx - G_off[0]) * gscale; // 250 LSB(d/s) default to radians/s
-    Gxyz[1] = ((float)gy - G_off[1]) * gscale;
-    Gxyz[2] = ((float)gz - G_off[2]) * gscale;
-
-    now = esp_timer_get_time();
-    deltat = (now - last) * 1.0e-6; // seconds since last update
-    last = now;
-    Mahony_update(Axyz[0], Axyz[1], Axyz[2], Gxyz[0], Gxyz[1], Gxyz[2], deltat);
-
-    // Compute Tait-Bryan angles. Strictly valid only for approximately level movement
-
-    // In this coordinate system, the positive z-axis is up, X north, Y west.
-    // Yaw is the angle between Sensor x-axis and Earth magnetic North
-    // (or true North if corrected for local declination, looking down on the sensor
-    // positive yaw is counterclockwise, which is not conventional for NED navigation.
-    // Pitch is angle between sensor x-axis and Earth ground plane, toward the
-    // Earth is positive, up toward the sky is negative. Roll is angle between
-    // sensor y-axis and Earth ground plane, y-axis up is positive roll. These
-    // arise from the definition of the homogeneous rotation matrix constructed
-    // from quaternions. Tait-Bryan angles as well as Euler angles are
-    // non-commutative; that is, the get the correct orientation the rotations
-    // must be applied in the correct order which for this configuration is yaw,
-    // pitch, and then roll.
-    // http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
-    // which has additional links.
-
-    // WARNING: This angular conversion is for DEMONSTRATION PURPOSES ONLY. It WILL
-    // MALFUNCTION for certain combinations of angles! See https://en.wikipedia.org/wiki/Gimbal_lock
-
     roll = atan2((q[0] * q[1] + q[2] * q[3]), 0.5 - (q[1] * q[1] + q[2] * q[2]));
     pitch = asin(2.0 * (q[0] * q[2] - q[1] * q[3]));
-    // conventional yaw increases clockwise from North. Not that the MPU-6500 knows where North is.
+    // conventional yaw increases clockwise from North.
     yaw = -atan2((q[1] * q[2] + q[0] * q[3]), 0.5 - (q[2] * q[2] + q[3] * q[3]));
     // to degrees
     yaw *= 180.0 / M_PI;
     if (yaw < 0)
         yaw += 360.0; // compass circle
-    // if (yaw >= 360)
-    //     yaw -= 360.0; // compass circle
     pitch *= 180.0 / M_PI;
     roll *= 180.0 / M_PI;
 }
@@ -292,41 +182,41 @@ uint16_t fudge_reading(uint16_t raw_reading, bool invert)
     return raw_reading;
 }
 
+uint16_t clamp(float value, float min, float max)
+{
+    if (value < min)
+        return min;
+    if (value > max)
+        return max;
+    return value;
+}
+
 // yaw is x axis
 uint16_t fix_yaw(float yaaw)
 {
-    int deadzone = 5;
+    int deadzone = 2;
     if ((-deadzone < yaaw) && (yaaw < deadzone))
     {
-        return 1950;
+        return 1975;
     }
 
     float rotate = fmod((yaaw + 180), 360.0); // rotate so 180 is midpoint
 
-    return 15 * (rotate - 180) + 1950;
+    return clamp(15 * 1.6 * (rotate - 180) + 1975, 1, 4000);
 }
 
 // roll is y axis
 uint16_t fix_roll(float rollll)
 {
-    int deadzone = 5;
+    int deadzone = 3;
     if ((-deadzone < rollll) && (rollll < deadzone))
     {
-        return 1950;
-    }
-
-    if (rollll > 120)
-    {
-        rollll = 120;
-    }
-    if (rollll < -120)
-    {
-        rollll = -120;
+        return 1975;
     }
 
     float rotate = fmod((rollll + 180), 360.0);
 
-    return 15 * (rotate - 180) + 1950;
+    return clamp(15 * 1.8 * (rotate - 180) + 1975, 1, 4000);
 }
 
 // Separate task to read sticks.
@@ -336,7 +226,6 @@ void local_analog_cb()
 {
     if (gyro_is_on)
     {
-        UpdateReadings();
         do_math();
 
         hoja_analog_data.rs_x = fix_yaw(yaw - hold_yaw);
@@ -374,29 +263,42 @@ void local_button_cb()
     hoja_button_data.button_up = !util_getbit(regread_low, GPIO_BTN_X);
     hoja_button_data.button_left = !util_getbit(regread_low, GPIO_BTN_Y);
 
-    hoja_button_data.trigger_l  = !util_getbit(regread_low, GPIO_BTN_L);
+    hoja_button_data.trigger_l = !util_getbit(regread_low, GPIO_BTN_L);
     hoja_button_data.trigger_zl = !util_getbit(regread_low, GPIO_BTN_L2);
-    hoja_button_data.trigger_r  = !util_getbit(regread_low, GPIO_BTN_R);
+    hoja_button_data.trigger_r = !util_getbit(regread_low, GPIO_BTN_R);
     hoja_button_data.trigger_zr = !util_getbit(regread_low, GPIO_BTN_R2);
-    hoja_button_data.button_stick_left  = !util_getbit(regread_low, GPIO_BTN_L3);
+    hoja_button_data.button_stick_left = !util_getbit(regread_low, GPIO_BTN_L3);
     hoja_button_data.button_stick_right = !util_getbit(regread_low, GPIO_BTN_R3);
     hoja_analog_data.lt_a = (hoja_button_data.trigger_zl) ? DPAD_ANALOG_POS : 0;
     hoja_analog_data.rt_a = (hoja_button_data.trigger_zr) ? DPAD_ANALOG_POS : 0;
 
-    hoja_button_data.dpad_up = !util_getbit(regread_low, GPIO_BTN_DU);
-    hoja_button_data.dpad_down = !util_getbit(regread_low, GPIO_BTN_DD);
-    hoja_button_data.dpad_left = !util_getbit(regread_low, GPIO_BTN_DL);
-    hoja_button_data.dpad_right = !util_getbit(regread_low, GPIO_BTN_DR);
+    bool new_dup = !util_getbit(regread_low, GPIO_BTN_DU);
+    if (new_dup == last_dup)
+        hoja_button_data.dpad_up = new_dup;
+    last_dup = new_dup;
+
+    bool new_ddown = !util_getbit(regread_low, GPIO_BTN_DD);
+    if (new_ddown == last_ddown)
+        hoja_button_data.dpad_down = new_ddown;
+    last_ddown = new_ddown;
+
+    bool new_dleft = !util_getbit(regread_low, GPIO_BTN_DL);
+    if (new_dleft == last_dleft)
+        hoja_button_data.dpad_left = new_dleft;
+    last_dleft = new_dleft;
+
+    bool new_dright = !util_getbit(regread_low, GPIO_BTN_DR);
+    if (new_dright == last_dright)
+        hoja_button_data.dpad_right = new_dright;
+    last_dright = new_dright;
 
     bool new_gyro = !util_getbit(regread_high, GPIO_BTN_GYRO_ON);
-    if (new_gyro != gyro_is_on) // has gyro enable state changed
+    if (new_gyro != gyro_is_on) // has gyro enable state changed?
     {
-        last = esp_timer_get_time();
         gyro_is_on = new_gyro;
 
         if (gyro_is_on)
         {
-            UpdateReadings();
             do_math();
             hold_yaw = yaw;
             hold_roll = roll;
@@ -408,9 +310,9 @@ void local_button_cb()
         }
     }
 
-    hoja_button_data.button_start  = !util_getbit(regread_high, GPIO_BTN_START);
+    hoja_button_data.button_start = !util_getbit(regread_high, GPIO_BTN_START);
     hoja_button_data.button_select = !util_getbit(regread_high, GPIO_BTN_SELECT);
-    hoja_button_data.button_home   = !util_getbit(regread_high, GPIO_BTN_HOME);
+    hoja_button_data.button_home = !util_getbit(regread_high, GPIO_BTN_HOME);
 }
 
 void local_boot_evt(hoja_boot_event_t evt)
@@ -438,12 +340,6 @@ void local_boot_evt(hoja_boot_event_t evt)
             hoja_set_core(HOJA_CORE_BT_DINPUT);
 
             err = hoja_start_core();
-            if (err == HOJA_OK)
-            {
-            }
-            else
-            {
-            }
         }
         break;
 
@@ -456,12 +352,6 @@ void local_boot_evt(hoja_boot_event_t evt)
             hoja_set_core(HOJA_CORE_BT_XINPUT);
 
             err = hoja_start_core();
-            if (err == HOJA_OK)
-            {
-            }
-            else
-            {
-            }
         }
         break;
 
@@ -474,12 +364,6 @@ void local_boot_evt(hoja_boot_event_t evt)
             core_ns_set_subcore(NS_TYPE_PROCON);
 
             err = hoja_start_core();
-            if (err == HOJA_OK)
-            {
-            }
-            else
-            {
-            }
         }
         break;
         }
@@ -561,7 +445,6 @@ void local_system_evt(hoja_system_event_t evt, uint8_t param)
 {
     const char *TAG = "local_system_evt";
     ESP_LOGI(TAG, "called local_system_evt");
-    // util_battery_boot_status();
     switch (evt)
     {
     // Called after API initialize function
@@ -608,39 +491,6 @@ void local_system_evt(hoja_system_event_t evt, uint8_t param)
     ESP_LOGI(TAG, "finished local_system_evt");
 }
 
-void local_bt_evt(hoja_bt_event_t evt)
-{
-    const char *TAG = "local_bt_evt";
-
-    switch (evt)
-    {
-    default:
-        ESP_LOGI(TAG, "Unknown bt event");
-        break;
-
-    case HEVT_BT_STARTED:
-        ESP_LOGI(TAG, "BT Started OK.");
-        break;
-
-    case HEVT_BT_CONNECTING:
-        ESP_LOGI(TAG, "Connecting BT...");
-        break;
-
-    case HEVT_BT_PAIRING:
-        ESP_LOGI(TAG, "Pairing BT Device.");
-        break;
-
-    case HEVT_BT_CONNECTED:
-        ESP_LOGI(TAG, "BT Device Connected.");
-        break;
-
-    case HEVT_BT_DISCONNECTED:
-        ESP_LOGI(TAG, "BT Device Disconnected.");
-
-        break;
-    }
-}
-
 // Callback to handle HOJA events
 void local_event_cb(hoja_event_type_t type, uint8_t evt, uint8_t param)
 {
@@ -663,22 +513,71 @@ void local_event_cb(hoja_event_type_t type, uint8_t evt, uint8_t param)
         local_system_evt(evt, param);
         break;
 
-    case HOJA_EVT_BT:
-        ESP_LOGI(TAG, "HOJA_EVT_BT");
-        local_bt_evt(evt);
-        break;
+        ESP_LOGI(TAG, "finished local_event_cb");
     }
-    ESP_LOGI(TAG, "finished local_event_cb");
 }
 
 void init_gyro()
 {
-    ESP_ERROR_CHECK(i2c_master_init());
+    const char *TAG = "init_gyro";
+    ESP_ERROR_CHECK(i2c_param_config(icm_config.i2c_port, &conf));
+    ESP_ERROR_CHECK(i2c_driver_install(icm_config.i2c_port, conf.mode, 0, 0, 0));
 
-    /* Read the MPU6500 WHO_AM_I register, on power up the register should have the value 0x70 */
-    ESP_ERROR_CHECK(MPU6500_register_read(MPU6500_WHO_AM_I_REG, i2cData, 1));
+    /* setup ICM20948 device */
+    icm20948_init_i2c(&icm, &icm_config);
 
-    reset_gyro();
+    /* check ID */
+    while (icm20948_check_id(&icm) != ICM_20948_STAT_OK)
+    {
+        ESP_LOGW(TAG, "check id failed");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    ESP_LOGI(TAG, "check id passed");
+
+    /* check whoami */
+    icm20948_status_e stat = ICM_20948_STAT_ERR;
+    uint8_t whoami = 0x00;
+    while ((stat != ICM_20948_STAT_OK) || (whoami != ICM_20948_WHOAMI))
+    {
+        whoami = 0x00;
+        stat = icm20948_get_who_am_i(&icm, &whoami);
+        ESP_LOGW(TAG, "whoami does not match (0x %d). Waiting...", whoami);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    ESP_LOGI(TAG, "whoami matches (0x %d). Waiting...", whoami);
+
+    /* Here we are doing a SW reset to make sure the device starts in a known state */
+    icm20948_sw_reset(&icm);
+    vTaskDelay(250 / portTICK_PERIOD_MS);
+
+    icm20948_internal_sensor_id_bm sensors = (icm20948_internal_sensor_id_bm)(ICM_20948_INTERNAL_ACC | ICM_20948_INTERNAL_GYR);
+
+    // Set Gyro and Accelerometer to a particular sample mode
+    // optiona: SAMPLE_MODE_CONTINUOUS. SAMPLE_MODE_CYCLED
+    icm20948_set_sample_mode(&icm, sensors, SAMPLE_MODE_CONTINUOUS);
+
+    // Set full scale ranges for both acc and gyr
+    icm20948_fss_t myfss;
+    myfss.a = GPM_2;   // (icm20948_accel_config_fs_sel_e)
+    myfss.g = DPS_250; // (icm20948_gyro_config_1_fs_sel_e)
+    icm20948_set_full_scale(&icm, sensors, myfss);
+
+    // Set up DLPF configuration
+    icm20948_dlpcfg_t myDLPcfg;
+    myDLPcfg.a = ACC_D473BW_N499BW;
+    myDLPcfg.g = GYR_D361BW4_N376BW5;
+    icm20948_set_dlpf_cfg(&icm, sensors, myDLPcfg);
+
+    // Choose whether or not to use DLPF
+    icm20948_enable_dlpf(&icm, ICM_20948_INTERNAL_ACC, true);
+    icm20948_enable_dlpf(&icm, ICM_20948_INTERNAL_GYR, true);
+
+    // Now wake the sensor up
+    icm20948_sleep(&icm, false);
+    icm20948_low_power(&icm, false);
+
+    /* now the fun with DMP starts */
+    init_dmp(&icm);
 }
 
 void init_hoja()
@@ -694,14 +593,13 @@ void init_hoja()
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&io_conf);
 
+    hoja_button_remap_enable(false);
+
     hoja_register_button_callback(local_button_cb);
     hoja_register_analog_callback(local_analog_cb);
     hoja_register_event_callback(local_event_cb);
 
     ESP_ERROR_CHECK(hoja_init());
-
-    hoja_analog_data.rs_x = fix_yaw(0);
-    hoja_analog_data.rs_y = fix_roll(0);
 }
 
 void app_main()
@@ -712,12 +610,5 @@ void app_main()
     init_gyro();
     init_hoja();
 
-    for (int i = 0; 1 < 100; i++)
-    {
-        UpdateReadings();
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    do_math();
-    local_analog_cb();
-    local_button_cb();
+    UpdateReadings();
 }
