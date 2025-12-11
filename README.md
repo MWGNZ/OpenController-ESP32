@@ -1,7 +1,7 @@
 # OpenController-ESP32
 
 Custom controller that works as both an XInput and Nintendo Pro Controller over Bluetooth.
-Uses an ESP32 as the brains, and an MPU6500 to replace the right stick with gyro inputs.
+Uses an ESP32 as the brains, and an ICM-20948 to replace the right stick with gyro inputs.
 
 ## Building
 There's vscode tasks setup that will configure all the needed requirements, as well as pass your ESP32 through so it can be flashed/monitored (as long as your on linux, your mileage may vary in other OS's).
@@ -11,8 +11,6 @@ The bare minimum steps required to build one as documented are:
 1. Print [all the STL's](3d/STL/).
 2. Install docker, press Control+Shift+B in vscode, and choose `Flash` while your ESP32 is plugged in.
 3. Wire everything up exactly as specified in the [schematic](hardware/Controller%20Wiring.kicad_sch).
-
-you should also consider calibrating your MPU6500 using someting like [this](https://github.com/blinkmaker/Improved-MPU6050-calibration) and then updating `A_cal` and `G_off` in [the code](main/main.c)
 
 ## Using the controller
 * the default mode is Switch Pro
